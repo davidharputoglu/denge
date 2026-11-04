@@ -39,12 +39,20 @@ export function cellLabel(grid, r, c) {
 }
 
 // ── Placement d'un objet (mode manuel guidé) ─────────────────────────────────
-// Renvoie { ok, reason } — vérifie case libre et charge utile restante.
+// Renvoie { ok, reason } — vérifie que l'EMPREINTE entière du bloc h×w est
+// libre à partir de (r,c), et que la charge utile restante le permet.
 export function canPlace(state, r, c) {
   const g = state.grid;
-  if (g[r][c] !== null) return { ok: false, reason: 'Emplacement occupé' };
   const item = state.items.find(i => i.id === state.selectedItemId);
   if (!item) return { ok: false, reason: 'Aucun objet sélectionné' };
+  const rows = g.length, cols = g[0].length;
+  const [h, w] = footprintFor(item, cols, rows);
+  if (r + h > rows || c + w > cols)
+    return { ok: false, reason: `Trop grand ici (${h}×${w}) — placez-le plus au centre/fond` };
+  for (let a = 0; a < h; a++)
+    for (let b = 0; b < w; b++)
+      if (g[r + a][c + b] !== null)
+        return { ok: false, reason: 'Emplacement occupé' };
   const itemsById = Object.fromEntries(state.items.map(i => [i.id, i]));
   const used = weightOf(g, itemsById);
   const vehicle = currentVehicle(state);
@@ -54,8 +62,55 @@ export function canPlace(state, r, c) {
   return { ok: true };
 }
 
-export function placeItem(grid, itemId, r, c) {
+// ── Empreinte rectangulaire (formes des objets) ──────────────────────────────
+// Un objet occupe un bloc h×w de cases contiguës. Sans dimensions explicites,
+// on déduit le bloc du volume (encombrement en « cases ») : le plus compact
+// possible (≈ carré), ex. volume 4 → 2×2 ; volume 3 → 1×3 (allongé, ex. tuyaux).
+export function footprintFor(item, cols, rows) {
+  if (item.footprint) {
+    const [h, w] = item.footprint;
+    if (h >= 1 && w >= 1 && h <= rows && w <= cols) return [h, w];
+  }
+  const v = Math.max(1, Math.round(item.volume ?? 1));
+  let best = [1, v], bestDiff = Infinity;
+  for (let hh = 1; hh <= v; hh++) {
+    if (v % hh !== 0) continue;
+    const ww = v / hh;
+    if (hh > rows || ww > cols) continue;
+    const diff = Math.abs(hh - ww);
+    if (diff < bestDiff) { bestDiff = diff; best = [hh, ww]; }
+  }
+  // si aucune forme ne rentre dans la grille, retomber sur 1 case
+  if (best[0] > rows || best[1] > cols) return [1, 1];
+  return best;
+}
+
+// Toutes les positions (r,c = coin haut-gauche) où le bloc est libre
+export function freePositions(grid, item, cols, rows) {
+  const [h, w] = footprintFor(item, cols, rows);
+  const out = [];
+  for (let r = 0; r + h <= rows; r++)
+    for (let c = 0; c + w <= cols; c++) {
+      let ok = true;
+      outer: for (let a = 0; a < h; a++)
+        for (let b = 0; b < w; b++)
+          if (grid[r + a][c + b] != null) { ok = false; break outer; }
+      if (ok) out.push({ r, c, h, w });
+    }
+  return out;
+}
+
+export function placeItem(grid, itemId, r, c, item = null, cols = null, rows = null) {
   const g = grid.map(row => row.slice());
+  // avec un objet connu → on pose son empreinte complète (bloc h×w)
+  if (item && cols && rows) {
+    const pos = freePositions(grid, item, cols, rows)
+      .find(p => p.r === r && p.c === c);
+    if (!pos) return g;
+    for (let a = 0; a < pos.h; a++)
+      for (let b = 0; b < pos.w; b++) g[r + a][c + b] = itemId;
+    return g;
+  }
   g[r][c] = itemId;
   return g;
 }
@@ -64,10 +119,16 @@ export function removeItem(grid, itemId) {
   return grid.map(row => row.map(cell => (cell === itemId ? null : cell)));
 }
 
-// Poids total présent dans la grille (les ids référencent les items)
+// Poids total présent dans la grille — chaque objet compté UNE fois
+// (il peut occuper plusieurs cases via son empreinte)
 export function weightOf(grid, itemsById) {
+  const seen = new Set();
   let w = 0;
-  for (const id of grid.flat()) if (id != null && itemsById[id]) w += itemsById[id].weight;
+  for (const id of grid.flat())
+    if (id != null && itemsById[id] && !seen.has(id)) {
+      seen.add(id);
+      w += itemsById[id].weight;
+    }
   return w;
 }
 
@@ -81,17 +142,31 @@ export function analyze(grid, items, vehicle) {
   let perCol = new Array(cols).fill(0);
   let perRow = new Array(rows).fill(0);
 
+  // Chaque objet est compté UNE fois, à son barycentre d'empreinte :
+  // un bloc h×w réparti sa masse sur ses cases (poids / nombre de cases).
+  const seen = new Set();
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const id = grid[r][c];
       if (id == null) continue;
       const it = itemsById[id];
       if (!it) continue;
+      // remonter au coin haut-gauche du bloc de cet objet
+      let r0 = r, c0 = c;
+      while (r0 > 0 && grid[r0 - 1][c] === id) r0--;
+      while (c0 > 0 && grid[r0][c0 - 1] === id) c0--;
+      if (seen.has(`${id}@${r0},${c0}`)) continue;
+      seen.add(`${id}@${r0},${c0}`);
+      let h = 1; while (r0 + h < rows && grid[r0 + h][c0] === id) h++;
+      let w = 1; while (c0 + w < cols && grid[r0][c0 + w] === id) w++;
+      const n = h * w;
+      const bx = c0 + (w - 1) / 2, by = r0 + (h - 1) / 2;
       W += it.weight;
-      sumX += it.weight * c;
-      sumY += it.weight * r;
-      perCol[c] += it.weight;
-      perRow[r] += it.weight;
+      sumX += it.weight * bx;
+      sumY += it.weight * by;
+      // répartition de la masse sur les colonnes/lignes couvertes
+      for (let b = 0; b < w; b++) perCol[c0 + b] += it.weight / w;
+      for (let a = 0; a < h; a++) perRow[r0 + a] += it.weight / h;
     }
   }
 
@@ -292,11 +367,19 @@ export function autoLoad(items, vehicle, gridDims = null) {
     if (usedVol + need > totalCellVol) { skipped.push(it); continue; }
 
     // candidates : combinaisons de `need` cases libres en bloc rectangulaire
-    // (compact → stable et empilable). Ex. volume 4 ⇒ 1×4, 2×2 ou 4×1.
+    // (compact → stable et empilable). On respecte l'EMPREINTE de l'objet si
+    // définie (palette = 2×2, échelle = 1×3…), sinon toutes les factorisations
+    // du volume. La rotation est autorisée quand h≠w (on retourne le bloc).
     const freeAt = (r, c) => r < rows && c < cols && !cells[r * cols + c].taken;
     const combos = [];
     const divs = [];
-    for (let h = 1; h <= need; h++) if (need % h === 0) divs.push([h, need / h]); // [hauteur, largeur]
+    if (it.footprint) {
+      const [fh, fw] = it.footprint;
+      divs.push([fh, fw]);
+      if (fh !== fw) divs.push([fw, fh]); // rotation 90°
+    } else {
+      for (let h = 1; h <= need; h++) if (need % h === 0) divs.push([h, need / h]); // [hauteur, largeur]
+    }
     for (const [hh, ww] of divs) {
       for (let r = 0; r + hh <= rows; r++) {
         for (let c = 0; c + ww <= cols; c++) {
@@ -380,27 +463,29 @@ export const VEHICLE_TYPES = [
   { id: 'custom',    name: 'Autre… (je saisis tout)',   payloadKg: null,  grid: null },
 ];
 
-// Catalogue d'objets de chantier : l'app « connaît » le poids grâce à ce
-// catalogue. Quand un objet est ajouté, une recherche par nom propose le poids.
+// Catalogue d'objets de chantier : l'app « connaît » le poids ET la forme de
+// ces objets (volume = nombre de cases au sol, footprint = bloc h×w imposé).
+// Quand un objet est ajouté, une recherche par nom propose poids + encombrement.
 export const ITEM_CATALOG = [
-  { name: 'Sac de ciment 25 kg (sur palette)', weight: 25, volume: 1, icon: '🧱' },
-  { name: 'Palette de parpaings',              weight: 900, volume: 4, icon: '🧱' },
+  { name: 'Sac de ciment 25 kg',               weight: 25, volume: 1, icon: '🧱' },
+  { name: 'Palette de parpaings',              weight: 900, volume: 4, footprint: [2, 2], icon: '🧱' },
   { name: 'Perforateur + coffret',             weight: 8,  volume: 1, icon: '🔨' },
   { name: 'Scie circulaire',                   weight: 12, volume: 1, icon: '🪚' },
-  { name: 'Panneaux OSB (gerbe)',              weight: 90, volume: 2, icon: '🟫' },
-  { name: 'Échelle aluminium',                 weight: 15, volume: 2, icon: '🪜' },
-  { name: 'Tuyaux PVC (faisceau)',             weight: 30, volume: 2, icon: '🟦' },
+  { name: 'Panneaux OSB (gerbe)',              weight: 90, volume: 2, footprint: [1, 2], icon: '🟫' },
+  { name: 'Échelle aluminium',                 weight: 15, volume: 3, footprint: [1, 3], icon: '🪜' },
+  { name: 'Tuyaux PVC (faisceau)',             weight: 30, volume: 2, footprint: [1, 2], icon: '🟦' },
   { name: 'Outillage électrique',              weight: 20, volume: 1, icon: '⚡' },
-  { name: 'Brouette',                          weight: 25, volume: 2, icon: '🛒' },
+  { name: 'Brouette',                          weight: 25, volume: 2, footprint: [2, 1], icon: '🛒' },
   { name: 'Groupe électrogène',                weight: 60, volume: 1, icon: '🔌' },
-  { name: 'Big-bag de sable',                  weight: 300, volume: 2, icon: '⛰️' },
+  { name: 'Big-bag de sable',                  weight: 300, volume: 2, footprint: [1, 2], icon: '⛰️' },
   { name: 'Sacs d’enduit / plâtre (lot)',      weight: 30, volume: 1, icon: '🪣' },
   { name: 'Caisse à outils',                   weight: 15, volume: 1, icon: '🧰' },
-  { name: 'Bétonnière',                        weight: 70, volume: 2, icon: '🌀' },
-  { name: 'Pieds biques / étai (lot)',         weight: 40, volume: 2, icon: '📐' },
+  { name: 'Bétonnière',                        weight: 70, volume: 4, footprint: [2, 2], icon: '🌀' },
+  { name: 'Pieds biques / étai (lot)',         weight: 40, volume: 2, footprint: [1, 2], icon: '📐' },
   { name: 'Radiateur fonte',                   weight: 45, volume: 1, icon: '♨️' },
   { name: 'Sac de gravier 15 kg',              weight: 15, volume: 1, icon: '🪨' },
-  { name: 'Fût / bidon 200 L (plein)',         weight: 220, volume: 2, icon: '🛢️' },
+  { name: 'Fût / bidon 200 L (plein)',         weight: 220, volume: 1, icon: '🛢️' },
+  { name: 'Bouteilles / pack eau + palettes',  weight: 12, volume: 1, icon: '🍾' },
 ];
 
 // Recherche floue simple par nom (accents/casse ignorés) → pré-remplit le poids

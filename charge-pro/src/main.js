@@ -2,7 +2,7 @@ import './style.css';
 import {
   VEHICLE_TYPES, ITEM_CATALOG, findCatalogMatch,
   initialState, loadState, saveState, currentVehicle, resolveVehicle, gridFromDims,
-  makeGrid, analyze, autoLoad, canPlace, placeItem, removeItem,
+  makeGrid, analyze, autoLoad, canPlace, placeItem, removeItem, footprintFor,
   colLabel, rowLabel, weightOf, DEFAULT_GRID,
 } from './engine.js';
 
@@ -100,24 +100,53 @@ function renderCharger(veh, rep) {
   // Conseil : meilleure case simulée pour l'objet sélectionné
   let adviceCell = null;
   if (selected) {
-    const res = autoLoad([...pendingItems()], veh, { cols, rows });
+    // repositionner les objets déjà en place : ils ne sont plus dans la liste
+    // « pending » → on rejoue leur placement sur une copie pour localiser
+    // l'objet sélectionné dans le plan complet.
+    const placedNow = state.grid.flat().filter(x => x != null);
+    const full = autoLoad(
+      [...pendingItems(), ...state.items.filter(i => placedNow.includes(i.id))],
+      veh, { cols, rows });
     for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
-      if (res.grid[r][c] === selected.id) adviceCell = { r, c };
+      if (full.grid[r][c] === selected.id) adviceCell = { r, c };
     }
   }
 
   let cellsHtml = '';
+  // empreinte du bloc de chaque objet posé (pour affichage fusionné + libellés)
+  const blockInfo = {}; // "r,c" coin haut-gauche → { h, w }
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const id = grid[r][c];
+    if (id == null) continue;
+    let r0 = r, c0 = c;
+    while (r0 > 0 && grid[r0 - 1][c] === id) r0--;
+    while (c0 > 0 && grid[r0][c0 - 1] === id) c0--;
+    if (!blockInfo[`${r0},${c0},${id}`]) {
+      let h = 1; while (r0 + h < rows && grid[r0 + h][c0] === id) h++;
+      let w = 1; while (c0 + w < cols && grid[r0][c0 + w] === id) w++;
+      blockInfo[`${r0},${c0},${id}`] = { h, w };
+    }
+  }
+  // prévisualisation de l'empreinte : cases que le bloc h×w couvrirait si posé ici
+  const selFp = selected ? footprintFor(selected, cols, rows) : null;
   for (let r = 0; r < rows; r++) {
     cellsHtml += `<div class="grid-row">`;
     for (let c = 0; c < cols; c++) {
       const id = grid[r][c];
       const it = id != null ? byId[id] : null;
       const isAdvice = adviceCell && adviceCell.r === r && adviceCell.c === c;
+      const inPreview = !it && selFp && adviceCell &&
+        r >= adviceCell.r && r < adviceCell.r + selFp[0] &&
+        c >= adviceCell.c && c < adviceCell.c + selFp[1];
+      const key = it ? `${r},${c},${id}` : null;
+      const blk = key ? blockInfo[key] : null;
+      const spanLabel = blk && blk.h * blk.w > 1 ? `${blk.h}×${blk.w}` : '';
       cellsHtml += `
-        <button class="cell ${it ? 'occupied' : 'free'} ${isAdvice ? 'advice' : ''}"
-                data-r="${r}" data-c="${c}" title="${esc(colLabel(cols, c))} · ${esc(rowLabel(rows, r))}">
-          ${it ? `<span class="cell-icon">${it.icon || '📦'}</span><span class="cell-kg">${it.weight}kg</span>`
-               : isAdvice ? '<span class="advice-tag">ICI ✅</span>' : '<span class="dot"></span>'}
+        <button class="cell ${it ? 'occupied' : 'free'} ${isAdvice ? 'advice' : ''} ${inPreview ? 'preview' : ''}"
+                data-r="${r}" data-c="${c}" title="${esc(colLabel(cols, c))} · ${esc(rowLabel(rows, r))}${spanLabel ? ' — occupe ' + spanLabel : ''}">
+          ${it ? `<span class="cell-icon">${it.icon || '📦'}</span><span class="cell-kg">${it.weight}kg${spanLabel ? ` <small>${spanLabel}</small>` : ''}</span>`
+               : isAdvice ? `<span class="advice-tag">ICI ✅${selFp && selFp[0] * selFp[1] > 1 ? ' (' + selFp[0] + '×' + selFp[1] + ')' : ''}</span>`
+               : inPreview ? '<span class="advice-tag">▢</span>' : '<span class="dot"></span>'}
         </button>`;
     }
     cellsHtml += `</div>`;
@@ -161,11 +190,14 @@ function renderCharger(veh, rep) {
 function renderObjets(veh, rep) {
   const loadedIds = state.grid.flat().filter(x => x != null);
 
-  // Catalogue : l'app « connaît » le poids de ces objets (correspondance par nom)
-  const catalogHtml = ITEM_CATALOG.map((t, idx) => `
+  // Catalogue : l'app « connaît » le poids ET la forme de ces objets
+  const catalogHtml = ITEM_CATALOG.map((t, idx) => {
+    const fp = t.footprint ? `${t.footprint[0]}×${t.footprint[1]}` : (t.volume > 1 ? `${t.volume} cases` : '');
+    return `
     <button class="tpl" data-tpl="${idx}">
-      ${t.icon} ${esc(t.name)} <b>${t.weight} kg</b><span class="plus">＋</span>
-    </button>`).join('');
+      ${t.icon} ${esc(t.name)} <b>${t.weight} kg</b>${fp ? ` <small>▢ ${fp}</small>` : ''}<span class="plus">＋</span>
+    </button>`;
+  }).join('');
 
   const allHtml = state.items.length === 0
     ? `<p class="empty">Aucun objet. Ajoutez-en depuis le catalogue ci-dessous ou en haut.</p>`
@@ -185,11 +217,18 @@ function renderObjets(veh, rep) {
     <form id="custom-form" class="custom">
       <input id="f-name" placeholder="Nom (ex.: Rouleau de câble)" required />
       <input id="f-weight" type="number" min="0.5" step="0.5" placeholder="Poids (kg)" required />
+      <select id="f-volume" title="Encombrement au sol">
+        <option value="1">Occupe 1 case</option>
+        <option value="2">Occupe 2 cases</option>
+        <option value="3">Occupe 3 cases</option>
+        <option value="4">Occupe 4 cases</option>
+      </select>
       <button class="primary" type="submit">Ajouter</button>
     </form>
     <p class="hint">⚖️ Astuce : pesez l'objet (balance de chantier, ou pèse-personne
-    en portant l'objet puis sans). Si son nom ressemble à un objet du catalogue,
-    l'app vous proposera automatiquement son poids connu.</p>
+    en portant l'objet puis sans). L'encombrement indique combien de « cases » au sol
+    il occupe (une case ≈ 45×60 cm) — l'algo calcule la forme du bloc automatiquement
+    (allongé pour les tuyaux, carré pour une bétonnière…).</p>
     <div id="catalog-suggest"></div>
   </section>
 
@@ -302,8 +341,10 @@ function bindEvents(veh, rep) {
       }
       const check = canPlace(state, r, c);
       if (!check.ok) { toast(check.reason, 'var(--red)'); return; }
-      state.grid = placeItem(state.grid, state.selectedItemId, r, c);
-      const it = state.items.find(i => i.id === state.selectedItemId);
+      const selIt = state.items.find(i => i.id === state.selectedItemId);
+      state.grid = placeItem(state.grid, state.selectedItemId, r, c,
+        selIt, state.grid[0].length, state.grid.length);
+      const it = selIt;
       state.selectedItemId = null;
       persist();
       afterChange(`✅ ${it?.name ?? 'Objet'} placé : ${colLabel(state.grid[0].length, c)} · ${rowLabel(state.grid.length, r)}`);
@@ -336,11 +377,11 @@ function bindEvents(veh, rep) {
     render();
   });
 
-  // Catalogue — poids connus
+  // Catalogue — poids ET formes connus
   app.querySelectorAll('[data-tpl]').forEach(b =>
     b.addEventListener('click', () => {
       const t = ITEM_CATALOG[Number(b.dataset.tpl)];
-      addItem(t.name, t.weight, t.icon);
+      addItem(t.name, t.weight, t.icon, t.volume ?? 1, t.footprint ?? null);
     }));
 
   const form = $('#custom-form');
@@ -348,20 +389,23 @@ function bindEvents(veh, rep) {
     e.preventDefault();
     const name = $('#f-name').value.trim();
     const w = parseFloat($('#f-weight').value);
+    const vol = parseInt($('#f-volume')?.value, 10) || 1;
     if (!name || !(w > 0)) { toast('Nom et poids valides requis', 'var(--red)'); return; }
-    addItem(name, w, '📦');
+    addItem(name, w, '📦', vol, null);
   });
 
-  // Suggestions de poids depuis le catalogue pendant la saisie du nom
+  // Suggestions de poids/forme depuis le catalogue pendant la saisie du nom
   const fName = $('#f-name');
   if (fName) fName.addEventListener('input', () => {
     const box = $('#catalog-suggest');
     const m = findCatalogMatch(fName.value);
     if (m && !$('#f-weight').value) {
+      const fp = m.footprint ? ` · occupe ${m.footprint[0]}×${m.footprint[1]} cases` : '';
       box.innerHTML = `<button class="suggest" id="btn-suggest">
-        📖 « ${esc(m.name)} » est au catalogue : <b>${m.weight} kg</b> — utiliser ce poids ?</button>`;
+        📖 « ${esc(m.name)} » est au catalogue : <b>${m.weight} kg</b>${fp} — reprendre ces valeurs ?</button>`;
       $('#btn-suggest').addEventListener('click', () => {
         $('#f-weight').value = m.weight;
+        if ($('#f-volume')) $('#f-volume').value = m.volume ?? 1;
         box.innerHTML = '';
       });
     } else box.innerHTML = '';
@@ -439,8 +483,8 @@ function bindEvents(veh, rep) {
     }));
 }
 
-function addItem(name, weight, icon) {
-  state.items.push({ id: state.nextId++, name, weight, icon });
+function addItem(name, weight, icon, volume = 1, footprint = null) {
+  state.items.push({ id: state.nextId++, name, weight, icon, volume, footprint });
   persist();
   toast(`➕ ${name} ajouté`, 'var(--blue)');
   render();

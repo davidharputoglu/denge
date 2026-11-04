@@ -234,3 +234,8 @@ button.ghost {
   animation: rise .25s ease;
 }
 @keyframes rise { from { opacity: 0; transform: translate(-50%, 10px); } }
+
+/* Prévisualisation d'empreinte (bloc h×w du sélectionné) */
+.cell.preview { outline: 2px dashed var(--blue); outline-offset: -3px; background: rgba(56,139,253,.12); }
+.cell-kg small { opacity: .75; font-weight: 600; }
+.tpl small { opacity: .8; font-weight: 600; margin-left: 4px; }
