@@ -234,6 +234,7 @@ export function analyze(grid, items, vehicle) {
   return {
     weightTotal: W, payload, loadPct: Math.min(loadPct, 999),
     leftRightPct, frontBackPct, perCol, perRow,
+    barycentres: { x: cx, y: cy },   // brut — indispensable pour recombiner avec les zones
     balanceScore, status, color,
     overPayload: W > payload,
   };
@@ -303,32 +304,33 @@ export function takeOut(grid, itemId) {
 }
 
 // ── Analyse incluant les zones hors sol (étagères) ───────────────────────────
+// IMPORTANT : on ne reconstruit PAS le barycentre à partir des % de analyze()
+// (perte d'info → fausses valeurs). analyze() expose `barycentres` bruts ;
+// ici on additionne les moments (poids × position) du coffre ET des étagères.
 export function analyzeWithZones(state, veh) {
   const rep = analyze(state.grid, state.items, veh);
   const zones = state.zones || [];
   if (!zones.length) return rep;
-  const itemsById = Object.fromEntries(state.items.map(i => [i.id, i]));
   const rows = state.grid.length, cols = state.grid[0].length;
   const midX = (cols - 1) / 2, midY = (rows - 1) / 2;
-  // si le coffre est vide, analyze() centre le barycentre → on suit la même règle
-  const W0 = rep.weightTotal > 0 ? rep.weightTotal : 0;
-  const sumX0 = W0 > 0 ? (midX + rep.leftRightPct / 100 * ((cols - 1) / 2 || 1)) * W0 : 0;
-  const sumY0 = W0 > 0 ? (midY + rep.frontBackPct / 100 * ((rows - 1) / 2 || 1)) * W0 : 0;
-  let W = W0, sumX = sumX0, sumY = sumY0;
-  let leftSum = 0, rightSum = 0;
+  const W0 = rep.weightTotal;
+  // barycentres réels du coffre (si vide, au centre géométrique — comme analyze)
+  const bx0 = rep.barycentres?.x ?? midX;
+  const by0 = rep.barycentres?.y ?? midY;
+  let W = W0, sumX = W0 * bx0, sumY = W0 * by0;
   const perZone = [];
   for (const z of zones) {
     const objs = state.items.filter(i => i.zoneId === z.id);
-    if (!objs.length) { perZone.push({ id: z.id, name: z.name, weight: 0, vol: 0 }); continue; }
     const zw = objs.reduce((a, i) => a + i.weight, 0);
-    const zx = objs.reduce((a, i) => a + i.weight * (itemsById[i.id].zoneSide === 'right' ? cols - 0.5 : 0.5), 0);
-    const zy = objs.reduce((a, i) => a + i.weight * (itemsById[i.id].zoneRow ?? (rows - 1) / 2), 0);
-    W += zw; sumX += zx; sumY += zy;
-    for (const i of objs) {
-      if (itemsById[i.id]?.zoneSide === 'right') rightSum += i.weight;
-      else leftSum += i.weight;
+    const zv = objs.reduce((a, i) => a + Math.max(1, Math.round(i.volume ?? 1)), 0);
+    if (objs.length) {
+      // position physique du support (paroi gauche/droite, rangée avant/arrière)
+      const zx = z.side === 'right' ? cols - 0.5 : z.side === 'center' ? midX : 0.5;
+      const zy = typeof z.rowFrac === 'number' ? z.rowFrac * (rows - 1) : midY;
+      sumX += zw * zx; sumY += zw * zy;
+      W += zw;
     }
-    perZone.push({ id: z.id, name: z.name, weight: zw, vol: objs.reduce((a, i) => a + Math.max(1, Math.round(i.volume ?? 1)), 0) });
+    perZone.push({ id: z.id, name: z.name, weight: zw, vol: zv });
   }
   if (W === W0) return rep; // rien en étagère
   const cx = sumX / W, cy = sumY / W;
@@ -401,6 +403,9 @@ export function autoLoad(items, vehicle, gridDims = null) {
   // gauche/droite de façon quasi égale (partition binaire par volume).
   // C'est ce qui évite le piège « 280 kg d'un côté, 20 kg de l'autre ».
   const nItems = sorted.length;
+  // Mono-colonne (moto, scooter, break étroit) : la contrainte gauche/droite est
+  // physiquement sans objet → on ne pénalise/jette aucun poids pour l'équilibre G/D.
+  const singleSide = cols < 2;
   const fitsVol = (mask) => {
     let v = 0;
     for (let i = 0; i < nItems; i++) if (mask & (1 << i)) v += Math.max(1, Math.round(sorted[i].volume));
@@ -450,7 +455,7 @@ export function autoLoad(items, vehicle, gridDims = null) {
       if (!m || !fitsVol(m)) return -Infinity;
       const s = selOf(m);
       const Wt = s.reduce((a, x) => a + x.weight, 0);
-      return Wt * 10000 - weightGap(s);   // maximiser le poids, puis minimiser l'écart G/D
+      return Wt * 10000 - (singleSide ? 0 : weightGap(s)); // mono-côté : seul le poids compte
     };
     let bestMask = greedy, bestQ = quality(greedy);
 
@@ -498,7 +503,7 @@ export function autoLoad(items, vehicle, gridDims = null) {
     for (let j = half; j >= 0; j--) if ((dp >> BigInt(j)) & 1n) return tot - 2 * j;
     return tot;
   };
-  const maxGapTol = Math.max(50, Math.round(payload * 10 * 0.12)); // dixièmes de kg
+  const maxGapTol = singleSide ? Infinity : Math.max(50, Math.round(payload * 10 * 0.12)); // dixièmes de kg
   const selOfMask = (m) => sorted.filter((_, i) => m & (1 << i));
   let chosenMask = bestSubset();
   if (gapOfList(selOfMask(chosenMask)) > maxGapTol && nItems <= 20) {
@@ -512,43 +517,48 @@ export function autoLoad(items, vehicle, gridDims = null) {
       }
       if (!ok || !fitsVol(m)) continue;
       const s = selOfMask(m);
-      const gap = gapOfList(s);
+      const gap = singleSide ? 0 : gapOfList(s); // mono-colonne : G/D sans objet
       if (gap > maxGapTol) continue;             // non équilibrable → rejeté
       const q = w * 10000 - gap;
       if (q > qBest) { qBest = q; mBest = m; }
     }
     if (mBest) chosenMask = mBest;              // sinon on garde le choix initial, l'étape C corrigera
   }
+  // Faisabilité physique du sous-ensemble : on vérifie que chaque empreinte
+  // rentre dans la grille et que les cases totales tiennent. Si le choix est
+  // irréaliste, on retombe sur le glouton LPT (toujours plaçable).
+  const feasible = (list) => {
+    let v = 0;
+    for (const x of list) {
+      const [h, w] = footprintFor(x, cols, rows);
+      if (h > rows || w > cols) return false;
+      const cellsN = x.shape
+        ? Math.max(1, x.shape.flat().reduce((a, q) => a + (q ? 1 : 0), 0))
+        : Math.max(1, Math.round(x.volume ?? 1));
+      v += Math.min(cellsN, h * w);
+    }
+    return v <= totalCellVol;
+  };
   let toPlace = sorted.filter((_, i) => chosenMask & (1 << i));
-
-  // ── Équilibrage gauche/droite AU POIDS, garanti ───────────────────────────
-  // Si aucun sous-ensemble ne permet un partage G/D quasi égal (ex. un seul
-  // objet de 280 kg + deux de 10 kg dans un coffre à 2 colonnes), on RETIRE
-  // les objets jusqu'à obtenir un écart de partition ≤ ~12 % de la charge :
-  // mieux vaut 290 kg bien équilibrés que 300 kg qui font pencher le véhicule.
-  {
-    const gapOf = (list) => {
-      if (list.length === 0) return 0;
-      const tot = Math.round(list.reduce((a, x) => a + x.weight, 0) * 10);
-      let dp = 1n;
-      for (const x of list) dp |= dp << BigInt(Math.max(1, Math.round(x.weight * 10)));
-      const half = Math.floor(tot / 2);
-      for (let j = half; j >= 0; j--) if ((dp >> BigInt(j)) & 1n) return tot - 2 * j;
-      return tot;
-    };
-    const maxGap = Math.max(50, Math.round(payload * 10 * 0.12)); // en dixièmes de kg
-    let guard = 0;
-    while (gapOf(toPlace) > maxGap && toPlace.length > 1 && guard++ < 40) {
-      const tot = toPlace.reduce((a, x) => a + x.weight, 0);
-      let worstIdx = 0, worstDist = -1;
-      for (let i = 0; i < toPlace.length; i++) {
-        const d = Math.abs(toPlace[i].weight - tot / 2); // l'objet « cassant » la partition
-        if (d > worstDist) { worstDist = d; worstIdx = i; }
+  if (!feasible(toPlace)) {
+    toPlace = [];
+    let wAcc = 0, vAcc = 0;
+    for (const x of sorted) {
+      const [h, w] = footprintFor(x, cols, rows);
+      if (h > rows || w > cols) continue;
+      const cellsN = Math.min(x.shape
+        ? Math.max(1, x.shape.flat().reduce((a, q) => a + (q ? 1 : 0), 0))
+        : Math.max(1, Math.round(x.volume ?? 1)), h * w);
+      if (wAcc + x.weight <= payload && vAcc + cellsN <= totalCellVol) {
+        toPlace.push(x); wAcc += x.weight; vAcc += cellsN;
       }
-      skipped.push(toPlace[worstIdx]);
-      toPlace.splice(worstIdx, 1);
     }
   }
+
+  // NB : aucun « retrait d'objets pour forcer l'équilibre G/D » ici : la répartition
+  // est garantie en amont (meilleur sous-ensemble équilibrable) puis corrigée à
+  // l'étape C ci-dessous. Retirer à l'aveugle vidait le coffre sur les petits
+  // véhicules (ex. break 300 kg avec [250,200,100,50] → un seul objet placé).
 
   for (let i = 0; i < nItems; i++) if (!(chosenMask & (1 << i))) skipped.push(sorted[i]);
   // évite les doublons dans skipped (retirés par équilibrage déjà poussés)
@@ -639,6 +649,29 @@ export function autoLoad(items, vehicle, gridDims = null) {
     }
 
     if (!best) { skipped.push(it); continue; }
+
+    // ── Étape C : correction finale si ce placement ferait vraiment pencher.
+    // On ne déplace cet objet que si son poids est lui-même ≥ la moitié du
+    // fardeau restant (sinon le problème vient des objets suivants, qu'on
+    // équilibrera en temps voulu — éviter l'effet « yo-yo »).
+    if (!singleSide && combos.length > 1) {
+      const totRemaining = pendingW; // poids encore à placer (it inclus)
+      if (it.weight >= totRemaining / 2) {
+        let alt = null, altCost = Infinity;
+        for (const combo of combos) {
+          const nn = combo.length || 1;
+          const wp2 = it.weight / nn;
+          const sumCx2 = combo.reduce((a, cl) => a + cl.x, 0);
+          const bx2 = (sumX + wp2 * sumCx2) / Math.max(1e-9, W + it.weight);
+          const lat2 = Math.abs(bx2 - targetX) / (targetX || 1);
+          if (lat2 < altCost - 1e-9) { altCost = lat2; alt = combo; }
+        }
+        const curCx = best.reduce((a, cl) => a + cl.x, 0) / (best.length || 1);
+        const curLat = Math.abs((sumX + (it.weight / bestN) * curCx) / Math.max(1e-9, W + it.weight) - targetX) / (targetX || 1);
+        if (alt && curLat - altCost > 0.08) { best = alt; bestN = alt.length || 1; }
+      }
+    }
+
     const wpc = it.weight / bestN;
     for (const cl of best) {
       cl.taken = true;
