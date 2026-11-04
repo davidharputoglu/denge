@@ -29,7 +29,7 @@ if not exist "%PROJ%\scripts\import-logo.py" (
 )
 
 REM 3) Lancer l'import (Python doit etre installe : python.org)
-python "%PROJ%\scripts\import-logo.py" "%IMG%"
+( where python >nul 2>python "%PROJ%\scripts\import-logo.py"1 python "%PROJ%\scripts\import-logo.py"python "%PROJ%\scripts\import-logo.py" python || python3 ) "%PROJ%\scripts\import-logo.py" "%IMG%"
 if errorlevel 1 (
     echo.
     echo Si la commande python est introuvable : installez Python depuis https://python.org
