@@ -231,10 +231,26 @@ export function detectFromImageData(imgData, opts = {}) {
     const y = (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000 | 0;
     lum[p] = y; hist[y]++;
   }
-  const { grid, usable } = classifyCells(lum, W, H, cellPx);
+  const { grid, thr, usable } = classifyCells(lum, W, H, cellPx);
   if (!usable || !grid.length || !grid[0].length) return { objects: [], note: 'lowcontrast' };
 
-  const blobs = findBlobs(grid).filter(b => b.length >= 2); // ignore le bruit
+  // Filet de sécurité : si le seuillage par luminance ne trouve RIEN (contre-
+  // jour, sol clair et objets clairs…), on retente avec la SATURATION couleur.
+  let workGrid = grid;
+  if (!findBlobs(grid).some(b => b.length >= 2)) {
+    const sat = new Uint8Array(W * H);
+    const histS = new Array(256).fill(0);
+    for (let i = 0, p = 0; i < data.length; i += 4, p++) {
+      const mx = Math.max(data[i], data[i + 1], data[i + 2]);
+      const mn = Math.min(data[i], data[i + 1], data[i + 2]);
+      const s = mx === 0 ? 0 : Math.round(((mx - mn) / mx) * 255);
+      sat[p] = s; histS[s]++;
+    }
+    const alt = classifyCells(sat, W, H, cellPx);
+    if (alt.usable && findBlobs(alt.grid).some(b => b.length >= 2)) workGrid = alt.grid;
+  }
+
+  const blobs = findBlobs(workGrid).filter(b => b.length >= 2); // ignore le bruit
   if (!blobs.length) return { objects: [], note: 'noblobs' };
 
   // ÉCHELLE : 1) objet-étalon familier détecté (sac, seau, pelle…) → précise ;
@@ -275,30 +291,40 @@ export function detectFromImageData(imgData, opts = {}) {
 
 // ---------- mémoire locale : silhouettes déjà confirmées ----------------------
 // LA SIGNATURE EST BASÉE SUR L'ENCOMBREMENT RÉEL EN CENTIMÈTRES, PAS SUR LES
-// PIXELS. Conséquence directe du problème « 1,5 L vs 0,5 L » :
-//   • bouteille de 1,5 L ≈ 30 cm de haut → palier « grand » ;
-//   • bouteille de 0,5 L ≈ 20 cm        → palier « moyen » ;
+// PIXELS. Les paliers combinent DEUX mesures indépendantes en cm réels :
+// la plus grande dimension (D) ET la racine carrée de la surface (S ≈
+// « diamètre équivalent »), plus l'allongement et la famille de forme (kind).
+// Conséquence directe du problème « 1,5 L vs 0,5 L » :
+//   • bouteille de 1,5 L ≈ 30 cm / ~70 cm²  → D3|S2 ;
+//   • bouteille de 0,5 L ≈ 20 cm / ~30 cm²  → D2|S1 ;
 // tailles réelles différentes ⇒ signatures différentes ⇒ le poids mémorisé
-// du 1,5 L NEST PAS appliqué au 0,5 L : l'app redemande (une seule fois).
+// du 1,5 L N'EST PAS appliqué au 0,5 L : l'app redemande (une seule fois).
 // Inversement, la MÊME bétonnière photographiée de plus loin garde le même
-// encombrement réel en cm ⇒ même palier ⇒ poids repris automatiquement.
-export function sizeTier(cm) {
-  // paliers grossiers mais robustes (± facteur ~1.6 entre chaque cran)
-  if (cm < 15) return 0;   // très petit : brique, bouteille 0,5 L, outillage main
-  if (cm < 30) return 1;   // petit : seau, sac posé, bouteille 1,5 L couchée
-  if (cm < 50) return 2;   // moyen : bac à mortier, gaz butane, pied-de-biche
-  if (cm < 80) return 3;   // gros : bétonnière, fût, caisse roulante
-  if (cm < 140) return 4;  // très gros : palette, touret, panneau
-  return 5;                // hors norme
+// encombrement réel en cm ⇒ mêmes paliers ⇒ poids repris automatiquement.
+const TIERS_D = [12, 20, 30, 45, 70, 110];      // grandes dimensions (cm)
+const TIERS_S = [Math.sqrt(80), Math.sqrt(300), Math.sqrt(900),
+                 Math.sqrt(2200), Math.sqrt(5000)]; // √surface (cm)
+
+function tierOf(v, tiers) {
+  let t = 0;
+  while (t < tiers.length && v >= tiers[t]) t++;
+  return t;
 }
+
+export function sizeTier(cm) { return tierOf(cm, TIERS_D); }
+export function sqrtAreaTier(sqrtAreaCm) { return tierOf(sqrtAreaCm, TIERS_S); }
 
 export function signatureOf(obj) {
   const s = obj.stats;
-  // dimension réelle max (cm) si l'échelle est connue dans le résultat de scan
-  const dimMaxCm = obj.footprintCm
-    ? Math.max(obj.footprintCm.w, obj.footprintCm.h)
-    : Math.max(s.bboxH, s.bboxW) * 10; // secours : échelle arbitraire
-  return `${obj.kind}|T${sizeTier(dimMaxCm)}|${Math.round(s.elongation * 2) / 2}`;
+  // dimensions RÉELLES en cm si l'échelle est connue dans le résultat de scan
+  const real = obj.footprintCm
+    ? { w: obj.footprintCm.w, h: obj.footprintCm.h }
+    : { w: Math.round(s.bboxW * 10), h: Math.round(s.bboxH * 10) }; // secours
+  const dimMaxCm = Math.max(real.w, real.h);
+  const sqrtAreaCm = Math.sqrt(Math.max(1, s.areaCells)) *
+    (obj.scaleCmPerCell ?? 10); // surface réelle ≈ cells × (cm/cell)²
+  return `${obj.kind}|D${tierOf(dimMaxCm, TIERS_D)}|S${tierOf(sqrtAreaCm, TIERS_S)}|` +
+    `${Math.round(s.elongation * 2) / 2}`;
 }
 
 export function matchMemory(objects, memory) {
