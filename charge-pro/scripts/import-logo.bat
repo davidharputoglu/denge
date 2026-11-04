@@ -19,20 +19,25 @@ if "%IMG%"=="" (
     exit /b 1
 )
 
-REM 2) Localiser le projet Denge (dossier charge-pro a cote du depot git)
+REM 2) Localiser le projet Denge (dossier charge-pro contenant scripts)
 set "PROJ=%~dp0.."
 if not exist "%PROJ%\scripts\import-logo.py" (
-    echo ERREUR : dossier projet introuvable ^(%PROJ%^)
-    echo Editez la ligne PROJ ci-dessus avec le chemin de votre copie du projet.
+    echo ERREUR : scripts\import-logo.py introuvable a cote de ce .bat
+    echo Placez ce fichier dans le dossier scripts du projet Denge.
     pause
     exit /b 1
 )
 
-REM 3) Lancer l'import (Python doit etre installe : python.org)
-( where python >nul 2>python "%PROJ%\scripts\import-logo.py"1 python "%PROJ%\scripts\import-logo.py"python "%PROJ%\scripts\import-logo.py" python || python3 ) "%PROJ%\scripts\import-logo.py" "%IMG%"
+REM 3) Lancer l'import avec python ou python3 selon l'installation
+where python >nul 2>nul
+if %errorlevel%==0 (
+    python "%PROJ%\scripts\import-logo.py" "%IMG%"
+) else (
+    python3 "%PROJ%\scripts\import-logo.py" "%IMG%"
+)
 if errorlevel 1 (
     echo.
-    echo Si la commande python est introuvable : installez Python depuis https://python.org
+    echo Si Python est introuvable : installez-le depuis https://python.org
     echo puis relancez ce script.
 )
 echo.
