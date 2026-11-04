@@ -308,10 +308,24 @@ export function autoLoad(items, vehicle, gridDims = null) {
 
   function bestSubset() {
     if (nItems === 0) return 0;
-    // glouton LPT = borne basse (résultat toujours valide)
+    // glouton LPT = borne basse (résultat toujours valide).
+    // ⚠️ cases consommées = celles RÉELLES de la forme (masque), bornées par la
+    // taille de l'empreinte dans la grille : un objet dont l'empreinte ne RENTRE
+    // PAS (ex. bloc 1×3 dans une grille 1×2) est physiquement non chargeable —
+    // le dire ici évite au placement final de le marquer « placé » à tort.
+    // Un objet ne consomme que les cases où il y a de la matière : un rond 3×3
+    // (bétonnière, gaz) ne prend que 5 cases, pas 9 !
+    const cellsOf = (x) => x.shape
+      ? Math.max(1, x.shape.flat().reduce((a, v) => a + (v ? 1 : 0), 0))
+      : Math.max(1, Math.round(x.volume ?? 1));
+    const cellsOfPlaced = (x) => {
+      const [h, w] = footprintFor(x, cols, rows);
+      if (h > rows || w > cols) return Infinity;
+      return Math.min(cellsOf(x), h * w);
+    };
     let greedy = 0, wG = 0, vG = 0;
     for (let i = 0; i < nItems; i++) {
-      const vw = Math.max(1, Math.round(sorted[i].volume));
+      const vw = cellsOfPlaced(sorted[i]);
       if (wG + sorted[i].weight <= payload && vG + vw <= totalCellVol) {
         greedy |= (1 << i); wG += sorted[i].weight; vG += vw;
       }
@@ -557,13 +571,57 @@ export const ITEM_CATALOG = [
   { name: 'Sac de gravier 15 kg',              weight: 15, volume: 1, icon: '🪨' },
   { name: 'Fût / bidon 200 L (plein)',         weight: 220, volume: 1, icon: '🛢️' },
   { name: 'Pack eau / bouteilles',             weight: 12, volume: 1, icon: '🍾' },
+  // — extensions utiles au scan photo —
+  { name: 'Brouette pliante',                  weight: 18, volume: 2, footprint: [2, 1], icon: '🛒' },
+  { name: 'Escabeau',                          weight: 9,  volume: 1, icon: '🪜' },
+  { name: 'Meuleuse / disqueuse',              weight: 4,  volume: 1, icon: '⚙️' },
+  { name: 'Marteau-piqueur',                   weight: 30, volume: 1, icon: '🔨' },
+  { name: 'Treuil / palan',                    weight: 25, volume: 1, icon: '🪝' },
+  { name: 'Rouleau de câble électrique',       weight: 20, volume: 1, icon: '🧵' },
+  { name: 'Touret de câble',                   weight: 150, icon: '🎡', shape: SHAPES.rond3 },
+  { name: 'Bâche de couverture',               weight: 8,  volume: 1, icon: '🟩' },
+  { name: 'Bidon de carburant 20 L',           weight: 16, volume: 1, icon: '⛽' },
+  { name: 'Piquets / piquets de balisage (lot)', weight: 12, volume: 2, footprint: [1, 2], icon: '🚧' },
+  { name: 'Plaque de coffrage (gerbe)',        weight: 60, volume: 2, footprint: [1, 2], icon: '🟧' },
+  { name: 'Sac de terre végétale',             weight: 20, volume: 1, icon: '🌱' },
+  { name: 'Cric hydraulique / chandelles',     weight: 35, volume: 1, icon: '🛠️' },
 ];
 
 // Recherche floue simple par nom (accents/casse ignorés) → pré-remplit le poids
+// aliases : mots courants du chantier → nom du catalogue (pour la reconnaissance
+// photo et la saisie). ex. « pioche » peut être nommé « bêche », « pelle »…
+export const CATALOG_ALIASES = {
+  'betonniere': 'Bétonnière', 'bétonnière': 'Bétonnière', 'gacheuse': 'Bétonnière', 'malaxeur': 'Bétonnière',
+  'gaz': 'Bouteille de gaz butane', 'butane': 'Bouteille de gaz butane', 'propane': 'Bouteille de gaz butane',
+  'bouteille de gaz': 'Bouteille de gaz butane', 'bombonne': 'Bouteille de gaz butane',
+  'bache': 'Bâche de couverture', 'bâche': 'Bâche de couverture',
+  'parpaing': 'Palette de parpaings', 'agglo': 'Palette de parpaings', 'carreau': 'Palette de parpaings',
+  'ciment': 'Sac de ciment 25 kg', 'mortier': 'Sacs d’enduit / plâtre (lot)', 'platre': 'Sacs d’enduit / plâtre (lot)',
+  'gravier': 'Sac de gravier 15 kg', 'sable': 'Big-bag de sable',
+  'echelle': 'Échelle aluminium', 'escabeau': 'Escabeau',
+  'touret': 'Touret de câble', 'cable': 'Touret de câble', 'treuil': 'Treuil / palan',
+  'verin': 'Cric hydraulique / chandelles', 'chandelle': 'Cric hydraulique / chandelles',
+  'etai': 'Pieds biques / étai (lot)', 'etais': 'Pieds biques / étai (lot)', 'pieds biques': 'Pieds biques / étai (lot)',
+  'pieu': 'Piquets / piquets de balisage', 'piquet': 'Piquets / piquets de balisage',
+  'bidon': 'Fût / bidon 200 L (plein)', 'fut': 'Fût mécano / tonneau', 'baril': 'Fût mécano / tonneau',
+  'tonneau': 'Fût mécano / tonneau', 'radiateur': 'Radiateur fonte',
+  'pioche': 'Pelle', 'beche': 'Pelle', 'bêche': 'Pelle', 'pelle': 'Pelle',
+  'pied de biche': 'Pied-de-biche', 'pied-de-chevre': 'Pied-de-biche',
+  'meuleuse': 'Meuleuse / disqueuse', 'disqueuse': 'Meuleuse / disqueuse', 'grinder': 'Meuleuse / disqueuse',
+  'marteau piqueur': 'Marteau-piqueur', 'brise beton': 'Marteau-piqueur', 'bobine': 'Touret de câble',
+};
+
 export function findCatalogMatch(name) {
   const norm = (s) => s.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+  const raw = String(name || '').toLowerCase().trim();
   const q = norm(name);
   if (!q) return null;
+  // alias direct prioritaire (« bétonnière », « butane », « bâche »…)
+  const aliasTarget = CATALOG_ALIASES[raw] || CATALOG_ALIASES[q];
+  if (aliasTarget) {
+    const hit = ITEM_CATALOG.find(i => i.name === aliasTarget);
+    if (hit) return hit;
+  }
   let best = null, bestScore = 0;
   for (const it of ITEM_CATALOG) {
     const t = norm(it.name);

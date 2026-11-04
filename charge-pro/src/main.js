@@ -5,9 +5,12 @@ import {
   makeGrid, analyze, autoLoad, canPlace, placeItem, removeItem, footprintFor,
   shapeMaskFor, colLabel, rowLabel, weightOf, DEFAULT_GRID,
 } from './engine.js';
+import { scanImageEl, matchMemory, signatureOf } from './vision.js';
 
 let state = loadState() ?? initialState();
-let tab = 'charger'; // charger | objets | véhicule
+state.scanMemory ??= {};   // silhouettes déjà confirmées → poids connu
+state.lastScan ??= null;   // dernier résultat de scan photo (candidates)
+let tab = 'charger'; // charger | scan | objets | véhicule
 let pendingCatalogPick = null; // suggestion catalogue acceptée → forme exacte reprise
 
 const app = document.getElementById('app');
@@ -50,11 +53,13 @@ function render() {
     ${renderBalanceBar(report)}
 
     <main>${tab === 'charger' ? renderCharger(veh, report)
+        : tab === 'scan' ? renderScan()
         : tab === 'objets' ? renderObjets(veh, report)
         : renderVehicule(veh)}</main>
 
     <nav class="tabbar">
       <button data-tab="charger" class="${tab === 'charger' ? 'active' : ''}">📦<span>Charger</span></button>
+      <button data-tab="scan" class="${tab === 'scan' ? 'active' : ''}">📷<span>Scanner</span></button>
       <button data-tab="objets" class="${tab === 'objets' ? 'active' : ''}">🧰<span>Objets</span></button>
       <button data-tab="vehicule" class="${tab === 'vehicule' ? 'active' : ''}">🚐<span>Véhicule</span></button>
     </nav>`;
@@ -322,6 +327,73 @@ function renderVehicule(veh) {
   </section>`;
 }
 
+// Vue « Scanner 📷 » : photo → reconnaissance des formes → poids estimés
+// Le scan n'est PAS obligatoire : il accélère la saisie. Chaque proposition
+// reste modifiable (poids, forme, nom) avant d'aller dans l'inventaire.
+function renderScan() {
+  const scan = state.lastScan;
+  const memCount = Object.keys(state.scanMemory || {}).length;
+
+  const candidatesHtml = scan?.objects?.length
+    ? scan.objects.map((o, idx) => {
+        const sig = signatureOf(o);
+        const known = state.scanMemory[sig];
+        const estW = known ? known.weight : Math.round(((o.weightRange[0] + o.weightRange[1]) / 2) * 10) / 10;
+        const conf = known ? '✅ connu' : `${Math.round(o.confidence * 100)} %`;
+        return `
+        <div class="row cand">
+          <span class="row-icon">${o.icon}</span>
+          <span class="row-name">
+            ${esc(o.label)} · ~${o.footprintCm.w}×${o.footprintCm.h} cm
+            <b>${estW} kg</b><small> (${conf})</small>
+            ${known ? '' : `<br><input class="w-adj" data-widx="${idx}" type="number" min="0.5" step="0.5"
+               value="${estW}" style="width:90px" /> kg`}
+          </span>
+          <button class="primary small" data-accept="${idx}">➕ Inventaire</button>
+        </div>`;
+      }).join('')
+    : '';
+
+  return `
+  <section class="card">
+    <h2>📷 Photographier le matos au sol</h2>
+    <p class="hint">Posez les objets par terre, prenez-les en photo <b>de dessus</b>
+    (vue verticale). L'app découpe l'image, repère chaque silhouette, estime sa
+    taille et sa forme — puis propose un poids grâce au catalogue.</p>
+    <p class="hint">📏 <b>Pour une échelle exacte</b>, posez une feuille A4 à côté
+    des objets avant la photo. Sinon l'app estime (moins précis).</p>
+    <label class="primary bigbtn">📷 Prendre une photo / choisir une image
+      <input type="file" id="scan-file" accept="image/*" capture="environment" hidden />
+    </label>
+    <div id="scan-status"></div>
+  </section>
+
+  ${scan ? `
+  <section class="card">
+    <h2>Résultat du scan (${scan.objects.length} objet(s) vu(s))</h2>
+    <img class="scan-preview" src="${scan.previewUrl}" alt="photo analysée" />
+    <p class="hint">Échelle : ${scan.scaleSource === 'A4' ? 'exacte (feuille A4 détectée)'
+      : `estimée (~${scan.scaleCmPerCell} cm par pixel-analyse)`}.
+      Vérifiez/corrigez les poids puis ajoutez à l'inventaire.</p>
+    ${candidatesHtml || '<p class="empty">Rien reconnu — éclairage trop uniforme ?</p>'}
+  </section>` : ''}
+
+  <section class="card">
+    <h2>Comment ça marche (et ses limites)</h2>
+    <ul class="howto">
+      <li>🔍 <b>Formes</b> : segmentation par contraste (Otsu) → silhouettes ;
+          long/fin = pelle·pioche·barre·tuyau ; rond = bétonnière·gaz·fût
+          (coins libres réutilisables) ; plein = sac·caisse·palette.</li>
+      <li>⚖️ <b>Poids</b> : une caméra ne peut pas peser ! L'app croise la forme
+          reconnue avec le <b>catalogue de poids réels</b> → estimation affichée
+          avec son niveau de confiance. Vous confirmez ou corrigez une fois.</li>
+      <li>🧠 <b>Mémoire</b> : après confirmation (${memCount} silhouette(s) connue(s)),
+          la même forme revue en photo reprend le poids déjà validé, automatiquement.</li>
+      <li>📴 100 % local : aucune photo ne quitte le téléphone.</li>
+    </ul>
+  </section>`;
+}
+
 // ── Événements ───────────────────────────────────────────────────────────────
 function bindEvents(veh, rep) {
   app.querySelectorAll('[data-tab]').forEach(b =>
@@ -458,6 +530,7 @@ function bindEvents(veh, rep) {
       state.grid = makeGrid(v.grid.cols, v.grid.rows);
       state.selectedItemId = null;
       persist();
+
       toast(`Véhicule : ${v.name} (${v.payloadKg} kg max)`, 'var(--blue)');
       render();
     }));
@@ -509,6 +582,60 @@ function bindEvents(veh, rep) {
       persist();
       toast('Véhicule supprimé', 'var(--orange)');
       render();
+    }));
+
+  // ── 📷 Scan photo ──────────────────────────────────────────────────────────
+  const scanFile = $('#scan-file');
+  if (scanFile) scanFile.addEventListener('change', e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const status = $('#scan-status');
+    status.innerHTML = '<p class="hint">⏳ Analyse de l’image…</p>';
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      try {
+        const res = scanImageEl(img);
+        // mémoire locale : silhouettes déjà validées → poids repris direct
+        res.objects = matchMemory(res.objects, state.scanMemory);
+        state.lastScan = {
+          objects: res.objects, previewUrl: res.previewUrl,
+          scaleCmPerCell: res.scaleCmPerCell, scaleSource: res.scaleSource,
+        };
+        persist();
+        render();
+        if (!res.objects.length) toast('Aucune silhouette nette — éclairage/angle ?', 'var(--orange)');
+        else toast(`👁️ ${res.objects.length} objet(s) reconnu(s) — vérifiez les poids`, 'var(--blue)');
+      } catch {
+        status.innerHTML = '<p class="hint" style="color:var(--red)">❌ Impossible d’analyser cette image.</p>';
+      } finally { URL.revokeObjectURL(url); }
+    };
+    img.onerror = () => { status.innerHTML = '<p class="hint" style="color:var(--red)">❌ Image illisible.</p>'; URL.revokeObjectURL(url); };
+    img.src = url;
+    scanFile.value = '';
+  });
+
+  // Accepter un objet reconnu → inventaire (+ poids mémorisé pour ce type)
+  app.querySelectorAll('[data-accept]').forEach(b =>
+    b.addEventListener('click', () => {
+      const o = state.lastScan?.objects?.[Number(b.dataset.accept)];
+      if (!o) return;
+      const wInput = app.querySelector(`[data-widx="${b.dataset.accept}"]`);
+      const weight = wInput ? (parseFloat(wInput.value) || o.weightRange[1]) : o.weight;
+      // forme au sol déduite de la reconnaissance
+      let shape = null, volume = Math.max(1, o.volCells), footprint = null;
+      if (o.shapeHint === 'rond') shape = o.volCells >= 4 ? SHAPES.rond4 : SHAPES.rond3;
+      else if (o.shapeHint === 'long') shape = SHAPES.long;
+      else if (o.shapeHint === 'bloc' && o.volCells >= 2) {
+        const fp = footprintFor({ volume: o.volCells }, 3, 5); footprint = fp;
+      }
+      // nom : meilleur match catalogue (poids connu réutilisé), sinon libellé vu
+      const cat = findCatalogMatch(o.label);
+      const name = cat ? cat.name : o.label;
+      addItem(name, weight, o.icon, shape ? null : volume, footprint, shape);
+      // 🧠 mémorise : même silhouette revue en photo → ce poids confirmé
+      state.scanMemory[signatureOf(o)] = { weight, name };
+      persist();
     }));
 }
 

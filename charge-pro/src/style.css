@@ -239,3 +239,13 @@ button.ghost {
 .cell.preview { outline: 2px dashed var(--blue); outline-offset: -3px; background: rgba(56,139,253,.12); }
 .cell-kg small { opacity: .75; font-weight: 600; }
 .tpl small { opacity: .8; font-weight: 600; margin-left: 4px; }
+
+/* ── 📷 Scanner ── */
+.bigbtn {
+  display: block; text-align: center; padding: 14px; margin: 10px 0;
+  border-radius: 12px; color: #fff; font-weight: 700; cursor: pointer;
+}
+.scan-preview { width: 100%; border-radius: 12px; margin: 8px 0; }
+.cand .w-adj { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px; }
+.primary.small { padding: 8px 10px; font-size: 13px; border-radius: 10px; white-space: nowrap; }
+.howto li { margin: 6px 0; font-size: 13px; opacity: .9; }
