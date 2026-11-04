@@ -503,7 +503,14 @@ export function autoLoad(items, vehicle, gridDims = null) {
     for (let j = half; j >= 0; j--) if ((dp >> BigInt(j)) & 1n) return tot - 2 * j;
     return tot;
   };
-  const maxGapTol = singleSide ? Infinity : Math.max(50, Math.round(payload * 10 * 0.12)); // dixièmes de kg
+  // Tolérance de déséquilibre GAUCHE/DROITE acceptable, en DIXIÈMES de kg.
+  // Sur une grille étroite (2 colonnes), un écart même modeste fait déjà
+  // nettement pencher le véhicule : la vraie limite physique est proportionnelle
+  // à la charge elle-même (≈ 18 %) avec un plancher bas de 5 kg — et non un
+  // pourcentage fixe de la charge utile, qui autorisait 36 kg d'écart sur un
+  // break à 300 kg (⇒ 33 % de décalage latéral ⇒ statut « Déséquilibré »).
+  const maxGapTol = singleSide ? Infinity
+    : Math.max(50, Math.round(Math.min(payload, gapOfList(sorted)) * 10 * 0.18));
   const selOfMask = (m) => sorted.filter((_, i) => m & (1 << i));
   let chosenMask = bestSubset();
   if (gapOfList(selOfMask(chosenMask)) > maxGapTol && nItems <= 20) {
@@ -631,10 +638,10 @@ export function autoLoad(items, vehicle, gridDims = null) {
       const sumCx = combo.reduce((a, cl) => a + cl.x, 0);
       const wp = it.weight / nn;                    // poids par case OCCUPÉE
 
-      const nW = W + it.weight + futureW + emptyW;
-      const bx = (sumX + wp * sumCx + futLeft * xL + futRight * xR + emptyW * targetX) / nW;
+      const nW = W + it.weight + futureW;   // lester UNIQUEMENT par la masse restante réelle
+      const bx = (sumX + wp * sumCx + futLeft * xL + futRight * xR) / nW;
       const by = (sumY + wp * combo.reduce((a, cl) => a + cl.y, 0)
-                  + futureW * ((yF + yB) / 2) + emptyW * targetY) / nW;
+                  + futureW * ((yF + yB) / 2)) / nW;
 
       const lateral = Math.abs(bx - targetX) / (targetX || 1);   // penchaison G/D
       const longi   = Math.abs(by - targetY) / (targetY || 1);   // essieu AV/AR
