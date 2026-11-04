@@ -1,13 +1,14 @@
 import './style.css';
 import {
-  VEHICLE_TYPES, ITEM_CATALOG, findCatalogMatch,
+  VEHICLE_TYPES, ITEM_CATALOG, SHAPES, findCatalogMatch,
   initialState, loadState, saveState, currentVehicle, resolveVehicle, gridFromDims,
   makeGrid, analyze, autoLoad, canPlace, placeItem, removeItem, footprintFor,
-  colLabel, rowLabel, weightOf, DEFAULT_GRID,
+  shapeMaskFor, colLabel, rowLabel, weightOf, DEFAULT_GRID,
 } from './engine.js';
 
 let state = loadState() ?? initialState();
 let tab = 'charger'; // charger | objets | véhicule
+let pendingCatalogPick = null; // suggestion catalogue acceptée → forme exacte reprise
 
 const app = document.getElementById('app');
 const $ = sel => app.querySelector(sel);
@@ -127,26 +128,31 @@ function renderCharger(veh, rep) {
       blockInfo[`${r0},${c0},${id}`] = { h, w };
     }
   }
-  // prévisualisation de l'empreinte : cases que le bloc h×w couvrirait si posé ici
-  const selFp = selected ? footprintFor(selected, cols, rows) : null;
+  // prévisualisation de la FORME : cases que le masque couvrirait si posé ici
+  const selMask = selected ? shapeMaskFor(selected, cols, rows) : null;
   for (let r = 0; r < rows; r++) {
     cellsHtml += `<div class="grid-row">`;
     for (let c = 0; c < cols; c++) {
       const id = grid[r][c];
       const it = id != null ? byId[id] : null;
       const isAdvice = adviceCell && adviceCell.r === r && adviceCell.c === c;
-      const inPreview = !it && selFp && adviceCell &&
-        r >= adviceCell.r && r < adviceCell.r + selFp[0] &&
-        c >= adviceCell.c && c < adviceCell.c + selFp[1];
+      const inPreview = !it && selMask && adviceCell &&
+        r >= adviceCell.r && r < adviceCell.r + selMask.length &&
+        c >= adviceCell.c && c < adviceCell.c + selMask[0].length &&
+        selMask[r - adviceCell.r][c - adviceCell.c] === 1;
+      const previewHole = !it && selMask && adviceCell &&
+        r >= adviceCell.r && r < adviceCell.r + selMask.length &&
+        c >= adviceCell.c && c < adviceCell.c + selMask[0].length &&
+        selMask[r - adviceCell.r][c - adviceCell.c] !== 1;
       const key = it ? `${r},${c},${id}` : null;
       const blk = key ? blockInfo[key] : null;
       const spanLabel = blk && blk.h * blk.w > 1 ? `${blk.h}×${blk.w}` : '';
       cellsHtml += `
-        <button class="cell ${it ? 'occupied' : 'free'} ${isAdvice ? 'advice' : ''} ${inPreview ? 'preview' : ''}"
+        <button class="cell ${it ? 'occupied' : 'free'} ${isAdvice ? 'advice' : ''} ${inPreview ? 'preview' : ''} ${previewHole ? 'hole' : ''}"
                 data-r="${r}" data-c="${c}" title="${esc(colLabel(cols, c))} · ${esc(rowLabel(rows, r))}${spanLabel ? ' — occupe ' + spanLabel : ''}">
           ${it ? `<span class="cell-icon">${it.icon || '📦'}</span><span class="cell-kg">${it.weight}kg${spanLabel ? ` <small>${spanLabel}</small>` : ''}</span>`
-               : isAdvice ? `<span class="advice-tag">ICI ✅${selFp && selFp[0] * selFp[1] > 1 ? ' (' + selFp[0] + '×' + selFp[1] + ')' : ''}</span>`
-               : inPreview ? '<span class="advice-tag">▢</span>' : '<span class="dot"></span>'}
+               : isAdvice ? `<span class="advice-tag">ICI ✅</span>`
+               : inPreview ? '<span class="advice-tag">▣</span>' : '<span class="dot"></span>'}
         </button>`;
     }
     cellsHtml += `</div>`;
@@ -223,12 +229,18 @@ function renderObjets(veh, rep) {
         <option value="3">Occupe 3 cases</option>
         <option value="4">Occupe 4 cases</option>
       </select>
+      <select id="f-shape" title="Forme de l'objet">
+        <option value="auto">Forme auto (bloc)</option>
+        <option value="rond">Rond / ovale (bétonnière, gaz…)</option>
+        <option value="long">Long &amp; fin (barre, tuyau, pelle…)</option>
+      </select>
       <button class="primary" type="submit">Ajouter</button>
     </form>
     <p class="hint">⚖️ Astuce : pesez l'objet (balance de chantier, ou pèse-personne
     en portant l'objet puis sans). L'encombrement indique combien de « cases » au sol
-    il occupe (une case ≈ 45×60 cm) — l'algo calcule la forme du bloc automatiquement
-    (allongé pour les tuyaux, carré pour une bétonnière…).</p>
+    il occupe (une case ≈ 45×60 cm). Choisissez la FORME : un objet rond (bétonnière,
+    bouteille de gaz) laisse des coins libres où l'app glisse une pelle, une pioche
+    ou une barre d'acier — tout comme dans le coffre réel !</p>
     <div id="catalog-suggest"></div>
   </section>
 
@@ -381,7 +393,7 @@ function bindEvents(veh, rep) {
   app.querySelectorAll('[data-tpl]').forEach(b =>
     b.addEventListener('click', () => {
       const t = ITEM_CATALOG[Number(b.dataset.tpl)];
-      addItem(t.name, t.weight, t.icon, t.volume ?? 1, t.footprint ?? null);
+      addItem(t.name, t.weight, t.icon, t.volume ?? 1, t.footprint ?? null, t.shape ?? null);
     }));
 
   const form = $('#custom-form');
@@ -390,8 +402,21 @@ function bindEvents(veh, rep) {
     const name = $('#f-name').value.trim();
     const w = parseFloat($('#f-weight').value);
     const vol = parseInt($('#f-volume')?.value, 10) || 1;
+    const shapeSel = $('#f-shape')?.value || 'auto';
     if (!name || !(w > 0)) { toast('Nom et poids valides requis', 'var(--red)'); return; }
-    addItem(name, w, '📦', vol, null);
+    // si l'utilisateur a accepté une suggestion du catalogue → forme exacte du catalogue
+    if (pendingCatalogPick && Math.abs((pendingCatalogPick.weight ?? -1) - w) < 0.01) {
+      const p = pendingCatalogPick;
+      pendingCatalogPick = null;
+      addItem(name, w, '📦', p.volume ?? 1, p.footprint, p.shape);
+      return;
+    }
+    pendingCatalogPick = null;
+    // forme choisie par l'utilisateur → masque de cases (coins libres inclus)
+    let shape = null;
+    if (shapeSel === 'rond') shape = vol >= 4 ? SHAPES.rond4 : SHAPES.rond3;
+    else if (shapeSel === 'long') shape = SHAPES.long;
+    addItem(name, w, '📦', shape ? null : vol, null, shape);
   });
 
   // Suggestions de poids/forme depuis le catalogue pendant la saisie du nom
@@ -400,12 +425,16 @@ function bindEvents(veh, rep) {
     const box = $('#catalog-suggest');
     const m = findCatalogMatch(fName.value);
     if (m && !$('#f-weight').value) {
-      const fp = m.footprint ? ` · occupe ${m.footprint[0]}×${m.footprint[1]} cases` : '';
+      const fp = m.shape ? ' · forme spéciale (coins exploitables)'
+               : m.footprint ? ` · occupe ${m.footprint[0]}×${m.footprint[1]} cases` : '';
       box.innerHTML = `<button class="suggest" id="btn-suggest">
         📖 « ${esc(m.name)} » est au catalogue : <b>${m.weight} kg</b>${fp} — reprendre ces valeurs ?</button>`;
       $('#btn-suggest').addEventListener('click', () => {
+        // reprendre poids + encombrement + FORME réels du catalogue
+        pendingCatalogPick = { weight: m.weight, volume: m.volume ?? null,
+                               footprint: m.footprint ?? null, shape: m.shape ?? null };
         $('#f-weight').value = m.weight;
-        if ($('#f-volume')) $('#f-volume').value = m.volume ?? 1;
+        if ($('#f-volume') && m.volume != null) $('#f-volume').value = m.volume;
         box.innerHTML = '';
       });
     } else box.innerHTML = '';
@@ -483,8 +512,8 @@ function bindEvents(veh, rep) {
     }));
 }
 
-function addItem(name, weight, icon, volume = 1, footprint = null) {
-  state.items.push({ id: state.nextId++, name, weight, icon, volume, footprint });
+function addItem(name, weight, icon, volume = 1, footprint = null, shape = null) {
+  state.items.push({ id: state.nextId++, name, weight, icon, volume, footprint, shape });
   persist();
   toast(`➕ ${name} ajouté`, 'var(--blue)');
   render();

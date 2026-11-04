@@ -39,19 +39,21 @@ export function cellLabel(grid, r, c) {
 }
 
 // ── Placement d'un objet (mode manuel guidé) ─────────────────────────────────
-// Renvoie { ok, reason } — vérifie que l'EMPREINTE entière du bloc h×w est
-// libre à partir de (r,c), et que la charge utile restante le permet.
+// Renvoie { ok, reason } — vérifie que les cases RÉELLES de la FORME de l'objet
+// (masque, coins vides compris → libres) sont libres à partir de (r,c), et que
+// la charge utile restante le permet.
 export function canPlace(state, r, c) {
   const g = state.grid;
   const item = state.items.find(i => i.id === state.selectedItemId);
   if (!item) return { ok: false, reason: 'Aucun objet sélectionné' };
   const rows = g.length, cols = g[0].length;
-  const [h, w] = footprintFor(item, cols, rows);
+  const mask = shapeMaskFor(item, cols, rows);
+  const h = mask.length, w = mask[0].length;
   if (r + h > rows || c + w > cols)
     return { ok: false, reason: `Trop grand ici (${h}×${w}) — placez-le plus au centre/fond` };
   for (let a = 0; a < h; a++)
     for (let b = 0; b < w; b++)
-      if (g[r + a][c + b] !== null)
+      if (mask[a][b] && g[r + a][c + b] !== null)
         return { ok: false, reason: 'Emplacement occupé' };
   const itemsById = Object.fromEntries(state.items.map(i => [i.id, i]));
   const used = weightOf(g, itemsById);
@@ -85,16 +87,36 @@ export function footprintFor(item, cols, rows) {
   return best;
 }
 
-// Toutes les positions (r,c = coin haut-gauche) où le bloc est libre
-export function freePositions(grid, item, cols, rows) {
+// ── Masques de forme : comment l'app « comprend » les formes non rectangulaires ─
+// Chaque objet peut définir un masque de cases (grille de 0 et 1, 1 = matière).
+// Ex. bouteille (col vert étroit) : [[1],[1],[1]] ; bétonnière / gaz butane (rond) :
+//   0 1 0     le coffre reste un plan au sol : la grille sert à vérifier que deux
+//   1 1 1     objets ne se CHEVAUCHENT PAS — les coins vides d'un objet rond sont
+//   0 1 0     libres et peuvent accueillir une pelle, une pioche ou une barre d'acier !
+// Sans masque : rectangle plein h×w (empreinte), ou bloc déduit du volume.
+export function shapeMaskFor(item, cols, rows) {
+  if (item.shape) {
+    const m = item.shape;
+    if (m.length && m.every(r => Array.isArray(r) && r.length === m[0].length)) {
+      if (m.length <= rows && m[0].length <= cols) return m;
+    }
+  }
   const [h, w] = footprintFor(item, cols, rows);
+  return Array.from({ length: h }, () => Array.from({ length: w }, () => 1));
+}
+
+// Toutes les positions (r,c = coin haut-gauche du MASK) où l'objet est libre.
+// Seules les cases « 1 » du masque doivent être libres.
+export function freePositions(grid, item, cols, rows) {
+  const mask = shapeMaskFor(item, cols, rows);
+  const h = mask.length, w = mask[0].length;
   const out = [];
   for (let r = 0; r + h <= rows; r++)
     for (let c = 0; c + w <= cols; c++) {
       let ok = true;
       outer: for (let a = 0; a < h; a++)
         for (let b = 0; b < w; b++)
-          if (grid[r + a][c + b] != null) { ok = false; break outer; }
+          if (mask[a][b] && grid[r + a][c + b] != null) { ok = false; break outer; }
       if (ok) out.push({ r, c, h, w });
     }
   return out;
@@ -102,13 +124,15 @@ export function freePositions(grid, item, cols, rows) {
 
 export function placeItem(grid, itemId, r, c, item = null, cols = null, rows = null) {
   const g = grid.map(row => row.slice());
-  // avec un objet connu → on pose son empreinte complète (bloc h×w)
+  // avec un objet connu → on pose son MASQUE complet (forme réelle, pas un bloc)
   if (item && cols && rows) {
+    const mask = shapeMaskFor(item, cols, rows);
     const pos = freePositions(grid, item, cols, rows)
       .find(p => p.r === r && p.c === c);
     if (!pos) return g;
-    for (let a = 0; a < pos.h; a++)
-      for (let b = 0; b < pos.w; b++) g[r + a][c + b] = itemId;
+    for (let a = 0; a < mask.length; a++)
+      for (let b = 0; b < mask[0].length; b++)
+        if (mask[a][b]) g[r + a][c + b] = itemId;
     return g;
   }
   g[r][c] = itemId;
@@ -142,31 +166,41 @@ export function analyze(grid, items, vehicle) {
   let perCol = new Array(cols).fill(0);
   let perRow = new Array(rows).fill(0);
 
-  // Chaque objet est compté UNE fois, à son barycentre d'empreinte :
-  // un bloc h×w réparti sa masse sur ses cases (poids / nombre de cases).
-  const seen = new Set();
+  // Chaque objet est compté UNE fois, à son barycentre RÉEL : moyenne des
+  // centres des cases que sa FORME occupe (masque → un objet rond a son poids
+  // bien au centre de sa couronne, une barre d'acier sur toute sa longueur).
+  const done = new Set();    // "id" déjà comptés
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
       const id = grid[r][c];
-      if (id == null) continue;
+      if (id == null || done.has(id)) continue;
       const it = itemsById[id];
       if (!it) continue;
-      // remonter au coin haut-gauche du bloc de cet objet
-      let r0 = r, c0 = c;
-      while (r0 > 0 && grid[r0 - 1][c] === id) r0--;
-      while (c0 > 0 && grid[r0][c0 - 1] === id) c0--;
-      if (seen.has(`${id}@${r0},${c0}`)) continue;
-      seen.add(`${id}@${r0},${c0}`);
-      let h = 1; while (r0 + h < rows && grid[r0 + h][c0] === id) h++;
-      let w = 1; while (c0 + w < cols && grid[r0][c0 + w] === id) w++;
-      const n = h * w;
-      const bx = c0 + (w - 1) / 2, by = r0 + (h - 1) / 2;
+      done.add(id);
+      // toutes les cases contiguës de cet objet (flood fill) — l'objet est
+      // marqué « traité » dans `seenCells` pour ne pas recompter ses cases
+      const seenCells = new Set();
+      const cellsOf = [];
+      const stack = [[r, c]];
+      while (stack.length) {
+        const [a, b] = stack.pop();
+        if (a < 0 || b < 0 || a >= rows || b >= cols) continue;
+        if (grid[a][b] !== id || seenCells.has(`${a},${b}`)) continue;
+        seenCells.add(`${a},${b}`);
+        cellsOf.push([a, b]);
+        stack.push([a + 1, b], [a - 1, b], [a, b + 1], [a, b - 1]);
+      }
+      const n = cellsOf.length;
+      const bx = cellsOf.reduce((s, [, b]) => s + b, 0) / n;
+      const by = cellsOf.reduce((s, [a]) => s + a, 0) / n;
       W += it.weight;
       sumX += it.weight * bx;
       sumY += it.weight * by;
-      // répartition de la masse sur les colonnes/lignes couvertes
-      for (let b = 0; b < w; b++) perCol[c0 + b] += it.weight / w;
-      for (let a = 0; a < h; a++) perRow[r0 + a] += it.weight / h;
+      // répartition de la masse sur les colonnes/lignes réellement couvertes
+      const colSet = new Set(cellsOf.map(([, b]) => b));
+      const rowSet = new Set(cellsOf.map(([a]) => a));
+      for (const b of colSet) perCol[b] += it.weight / colSet.size;
+      for (const a of rowSet) perRow[a] += it.weight / rowSet.size;
     }
   }
 
@@ -363,38 +397,49 @@ export function autoLoad(items, vehicle, gridDims = null) {
   let pendingW = toPlace.reduce((a, x) => a + x.weight, 0);
   for (const it of toPlace) {
     if (W + it.weight > payload) { skipped.push(it); pendingW -= it.weight; continue; }
-    const need = Math.max(1, Math.round(it.volume));
+    // cases consommées : celles de la FORME si masque, sinon le volume (bloc)
+    const shapeCells = it.shape
+      ? it.shape.flat().reduce((a, v) => a + (v ? 1 : 0), 0)
+      : null;
+    const need = Math.max(1, shapeCells ?? Math.round(it.volume ?? 1));
     if (usedVol + need > totalCellVol) { skipped.push(it); continue; }
 
-    // candidates : combinaisons de `need` cases libres en bloc rectangulaire
-    // (compact → stable et empilable). On respecte l'EMPREINTE de l'objet si
-    // définie (palette = 2×2, échelle = 1×3…), sinon toutes les factorisations
-    // du volume. La rotation est autorisée quand h≠w (on retourne le bloc).
+    // candidates : positions du MASQUE de l'objet (forme réelle). Un objet rond
+    // (bétonnière, gaz butane) a un masque en croix/diamant → ses coins sont
+    // LIBRES et peuvent être occupés par une pelle ou un tuyau. Sans masque :
+    // rectangle h×w (empreinte), ou toutes les factorisations du volume.
+    // La rotation 90° est autorisée pour toute forme non carrée.
     const freeAt = (r, c) => r < rows && c < cols && !cells[r * cols + c].taken;
+    const maskOf = (m) => {
+      if (it.shape) return m ? it.shape.map(r => [...r].reverse()) : it.shape; // miroir
+      const [h, w] = footprintFor(it, cols, rows);
+      const base = Array.from({ length: h }, () => Array.from({ length: w }, () => 1));
+      if (!m) return base;
+      // transposition = rotation 90°
+      return base[0].map((_, i) => base.map(row => row[i]));
+    };
     const combos = [];
-    const divs = [];
-    if (it.footprint) {
-      const [fh, fw] = it.footprint;
-      divs.push([fh, fw]);
-      if (fh !== fw) divs.push([fw, fh]); // rotation 90°
-    } else {
-      for (let h = 1; h <= need; h++) if (need % h === 0) divs.push([h, need / h]); // [hauteur, largeur]
-    }
-    for (const [hh, ww] of divs) {
+    for (const mirrored of [false, true]) {
+      const mask = maskOf(mirrored);
+      if (mirrored && it.shape && JSON.stringify(mask) === JSON.stringify(it.shape)) break;
+      const hh = mask.length, ww = mask[0].length;
       for (let r = 0; r + hh <= rows; r++) {
         for (let c = 0; c + ww <= cols; c++) {
           let ok = true; const combo = [];
           for (let a = 0; a < hh && ok; a++) for (let b = 0; b < ww; b++) {
+            if (!mask[a][b]) continue;             // coin vide de la forme → libre
             if (!freeAt(r + a, c + b)) { ok = false; break; }
             combo.push(cells[(r + a) * cols + (c + b)]);
           }
           if (ok) combos.push(combo);
         }
       }
+      if (it.shape) break; // miroir déjà traité ci-dessus si asymétrique
     }
     if (combos.length === 0) { skipped.push(it); continue; }
 
-    const wPerCell = it.weight / need;
+    const nCells = Math.max(1, combos[0].length);   // cases réellement occupées
+    const wPerCell = it.weight / nCells;
     // masse restante à placer : on suppose qu'elle remplira le coffre de façon
     // homogène (½ gauche, ½ droite ; répartition AV/AR uniforme). Ce « lest
     // théorique » évite de sur-corriger l'équilibre avec le seul objet courant.
@@ -403,14 +448,16 @@ export function autoLoad(items, vehicle, gridDims = null) {
     const xL = targetX / 2, xR = targetX + (cols - targetX) / 2; // centres des moitiés G/D
     const yF = targetY / 2, yB = targetY + (rows - targetY) / 2;
 
-    let best = null, bestCost = Infinity;
+    let best = null, bestCost = Infinity, bestN = nCells;
     for (const combo of combos) {
-      const cyCell = combo.reduce((a, cl) => a + cl.y, 0) / need;
+      const nn = combo.length || 1;                 // cases du masque à cette rotation
+      const cyCell = combo.reduce((a, cl) => a + cl.y, 0) / nn;
       const sumCx = combo.reduce((a, cl) => a + cl.x, 0);
+      const wp = it.weight / nn;                    // poids par case OCCUPÉE
 
       const nW = W + it.weight + futureW;
-      const bx = (sumX + wPerCell * sumCx + futLeft * xL + futRight * xR) / nW;
-      const by = (sumY + wPerCell * combo.reduce((a, cl) => a + cl.y, 0)
+      const bx = (sumX + wp * sumCx + futLeft * xL + futRight * xR) / nW;
+      const by = (sumY + wp * combo.reduce((a, cl) => a + cl.y, 0)
                   + futureW * ((yF + yB) / 2)) / nW;
 
       const lateral = Math.abs(bx - targetX) / (targetX || 1);   // penchaison G/D
@@ -422,20 +469,21 @@ export function autoLoad(items, vehicle, gridDims = null) {
       const edgePenalty = (minC === 0 || maxC === cols - 1) ? 0.02 : 0;
 
       const cost = lateral * 2.0 + lateral * lateral * 3.0 + longi * 0.6 + heavyBack + edgePenalty;
-      if (cost < bestCost - 1e-9) { bestCost = cost; best = combo; }
+      if (cost < bestCost - 1e-9) { bestCost = cost; best = combo; bestN = nn; }
     }
 
     if (!best) { skipped.push(it); continue; }
+    const wpc = it.weight / bestN;
     for (const cl of best) {
       cl.taken = true;
       grid[cl.r][cl.c] = cl.takenId = it.id;
-      sumX += wPerCell * cl.x; sumY += wPerCell * cl.y;
+      sumX += wpc * cl.x; sumY += wpc * cl.y;
     }
-    // note : sumX/sumY ci-dessus additionnent wPerCell × centre de chaque case →
-    // exactement weight × barycentre du bloc. Cohérent avec analyze().
+    // note : sumX/sumY additionnent (poids/case occupée) × centre de chaque case
+    // → exactement weight × barycentre RÉEL de la forme. Cohérent avec analyze().
     W += it.weight;
     pendingW -= it.weight;
-    usedVol += need;
+    usedVol += bestN;   // l'objet ne consomme que les cases de sa FORME
     placedIds.push(it.id);
   }
 
@@ -463,9 +511,25 @@ export const VEHICLE_TYPES = [
   { id: 'custom',    name: 'Autre… (je saisis tout)',   payloadKg: null,  grid: null },
 ];
 
-// Catalogue d'objets de chantier : l'app « connaît » le poids ET la forme de
-// ces objets (volume = nombre de cases au sol, footprint = bloc h×w imposé).
-// Quand un objet est ajouté, une recherche par nom propose poids + encombrement.
+// Catalogue d'objets de chantier : l'app « connaît » le poids ET la FORME de ces
+// objets. shape = masque de cases au sol (1 = matière, 0 = coin libre où l'on
+// peut glisser une pelle/une barre). volume = nombre de cases consommées si pas
+// de masque. C'est ce qui permet de placer des objets longs DANS les coins vides
+// d'une bétonnière ou d'une bouteille de gaz, comme dans la vraie vie.
+export const SHAPES = {
+  // objet rond inscrit dans un carré 3×3 → 4 coins libres
+  rond3: [[0,1,0],[1,1,1],[0,1,0]],
+  // objet rond/ovale dans un carré 4×4 → 4 coins libres + rebords
+  rond4: [
+    [0,1,1,0],
+    [1,1,1,1],
+    [1,1,1,1],
+    [0,1,1,0],
+  ],
+  // long & fin en diagonal (pelle, pied-de-biche posé en biais)
+  long: [[1,0],[1,0],[1,1]],
+};
+
 export const ITEM_CATALOG = [
   { name: 'Sac de ciment 25 kg',               weight: 25, volume: 1, icon: '🧱' },
   { name: 'Palette de parpaings',              weight: 900, volume: 4, footprint: [2, 2], icon: '🧱' },
@@ -474,18 +538,25 @@ export const ITEM_CATALOG = [
   { name: 'Panneaux OSB (gerbe)',              weight: 90, volume: 2, footprint: [1, 2], icon: '🟫' },
   { name: 'Échelle aluminium',                 weight: 15, volume: 3, footprint: [1, 3], icon: '🪜' },
   { name: 'Tuyaux PVC (faisceau)',             weight: 30, volume: 2, footprint: [1, 2], icon: '🟦' },
+  { name: 'Barre d’acier / fer à béton',       weight: 25, volume: 3, footprint: [1, 3], icon: '📏' },
+  { name: 'Pelle',                             weight: 2,  icon: '⛏️', shape: SHAPES.long },
+  { name: 'Pioche',                            weight: 3,  icon: '🪓', shape: SHAPES.long },
+  { name: 'Pied-de-biche',                     weight: 6,  icon: '🦴', shape: SHAPES.long },
   { name: 'Outillage électrique',              weight: 20, volume: 1, icon: '⚡' },
   { name: 'Brouette',                          weight: 25, volume: 2, footprint: [2, 1], icon: '🛒' },
   { name: 'Groupe électrogène',                weight: 60, volume: 1, icon: '🔌' },
   { name: 'Big-bag de sable',                  weight: 300, volume: 2, footprint: [1, 2], icon: '⛰️' },
   { name: 'Sacs d’enduit / plâtre (lot)',      weight: 30, volume: 1, icon: '🪣' },
   { name: 'Caisse à outils',                   weight: 15, volume: 1, icon: '🧰' },
-  { name: 'Bétonnière',                        weight: 70, volume: 4, footprint: [2, 2], icon: '🌀' },
+  { name: 'Bétonnière',                        weight: 70, icon: '🌀', shape: SHAPES.rond3 },
+  { name: 'Bouteille de gaz butane',           weight: 16, icon: '🔥', shape: [[0,1,0],[1,1,1],[0,1,0]] },
+  { name: 'Fût mécano / tonneau',              weight: 120, icon: '🛢️', shape: SHAPES.rond3 },
+  { name: 'Bac à mortier / auge',              weight: 18, volume: 1, icon: '🥣' },
   { name: 'Pieds biques / étai (lot)',         weight: 40, volume: 2, footprint: [1, 2], icon: '📐' },
   { name: 'Radiateur fonte',                   weight: 45, volume: 1, icon: '♨️' },
   { name: 'Sac de gravier 15 kg',              weight: 15, volume: 1, icon: '🪨' },
   { name: 'Fût / bidon 200 L (plein)',         weight: 220, volume: 1, icon: '🛢️' },
-  { name: 'Bouteilles / pack eau + palettes',  weight: 12, volume: 1, icon: '🍾' },
+  { name: 'Pack eau / bouteilles',             weight: 12, volume: 1, icon: '🍾' },
 ];
 
 // Recherche floue simple par nom (accents/casse ignorés) → pré-remplit le poids
