@@ -239,6 +239,121 @@ export function analyze(grid, items, vehicle) {
   };
 }
 
+// ── Zones hors sol : ÉTAGÈRES / RANGEMENTS PAROI (camionnette aménagée) ──────
+// Une camionnette de chantier a souvent des étagères le long des parois. Ces
+// zones ne sont PAS sur la grille au sol : elles ont leur propre capacité
+// (poids max + encombrement en cases), et leurs objets comptent quand même
+// dans le poids total, l'essieu AV/AR et le barycentre latéral du véhicule.
+// Exemple concret : les pelles/pioches/barres IRREGULIÈRES ou légères partent
+// à la verticale dans « Racks à outils paroi », le coffre au sol garde les
+// charges lourdes et bien posées — comme dans une vraie camionnette aménagée.
+export function zoneCapacity(z) {
+  return {
+    slots: Math.max(1, Math.round(z.slots ?? 1)),
+    payloadKg: Math.max(1, z.capacityKg ?? 50),
+  };
+}
+
+export function zoneTotals(state) {
+  const itemsById = Object.fromEntries((state.items || []).map(i => [i.id, i]));
+  const zones = state.zones || [];
+  const byZone = {};
+  for (const z of zones) byZone[z.id] = { weight: 0, vol: 0, count: 0, pct: 0, capPct: 0 };
+  let pendingW = 0;
+  for (const it of state.items || []) {
+    if (it.zoneId && byZone[it.zoneId]) {
+      const c = zoneCapacity(zones.find(z => z.id === it.zoneId));
+      byZone[it.zoneId].weight += it.weight;
+      byZone[it.zoneId].vol += Math.max(1, Math.round(it.volume ?? 1));
+      byZone[it.zoneId].count++;
+      void c;
+    } else if (!state.grid.flat().includes(it.id)) {
+      pendingW += it.weight;
+    }
+  }
+  for (const z of zones) {
+    const t = byZone[z.id];
+    const c = zoneCapacity(z);
+    t.pct = c.payloadKg > 0 ? Math.round(t.weight / c.payloadKg * 100) : 0;
+    t.capPct = c.slots > 0 ? Math.round(t.vol / c.slots * 100) : 0;
+  }
+  return { byZone, pendingW };
+}
+
+// Un objet peut-il aller dans cette zone ? (rayon d'étagère, rack vertical…)
+export function canPutInZone(state, itemId, zoneId) {
+  const z = (state.zones || []).find(x => x.id === zoneId);
+  const it = state.items.find(i => i.id === itemId);
+  if (!z || !it) return { ok: false, reason: 'Zone ou objet introuvable' };
+  const c = zoneCapacity(z);
+  const inZone = (state.items || []).filter(i => i.zoneId === zoneId);
+  const wUsed = inZone.reduce((a, i) => a + i.weight, 0);
+  const vUsed = inZone.reduce((a, i) => a + Math.max(1, Math.round(i.volume ?? 1)), 0);
+  const vNeed = Math.max(1, Math.round(it.volume ?? 1));
+  if (wUsed + it.weight > c.payloadKg)
+    return { ok: false, reason: `« ${z.name} » : max ${c.payloadKg} kg (déjà ${wUsed} kg)` };
+  if (vUsed + vNeed > c.slots)
+    return { ok: false, reason: `« ${z.name} » complet (${vUsed}/${c.slots} cases occupées)` };
+  return { ok: true };
+}
+
+// Retirer un objet du coffre au sol (pour le mettre en étagère par ex.)
+export function takeOut(grid, itemId) {
+  return grid.map(row => row.map(cell => (cell === itemId ? null : cell)));
+}
+
+// ── Analyse incluant les zones hors sol (étagères) ───────────────────────────
+export function analyzeWithZones(state, veh) {
+  const rep = analyze(state.grid, state.items, veh);
+  const zones = state.zones || [];
+  if (!zones.length) return rep;
+  const itemsById = Object.fromEntries(state.items.map(i => [i.id, i]));
+  const rows = state.grid.length, cols = state.grid[0].length;
+  const midX = (cols - 1) / 2, midY = (rows - 1) / 2;
+  // si le coffre est vide, analyze() centre le barycentre → on suit la même règle
+  const W0 = rep.weightTotal > 0 ? rep.weightTotal : 0;
+  const sumX0 = W0 > 0 ? (midX + rep.leftRightPct / 100 * ((cols - 1) / 2 || 1)) * W0 : 0;
+  const sumY0 = W0 > 0 ? (midY + rep.frontBackPct / 100 * ((rows - 1) / 2 || 1)) * W0 : 0;
+  let W = W0, sumX = sumX0, sumY = sumY0;
+  let leftSum = 0, rightSum = 0;
+  const perZone = [];
+  for (const z of zones) {
+    const objs = state.items.filter(i => i.zoneId === z.id);
+    if (!objs.length) { perZone.push({ id: z.id, name: z.name, weight: 0, vol: 0 }); continue; }
+    const zw = objs.reduce((a, i) => a + i.weight, 0);
+    const zx = objs.reduce((a, i) => a + i.weight * (itemsById[i.id].zoneSide === 'right' ? cols - 0.5 : 0.5), 0);
+    const zy = objs.reduce((a, i) => a + i.weight * (itemsById[i.id].zoneRow ?? (rows - 1) / 2), 0);
+    W += zw; sumX += zx; sumY += zy;
+    for (const i of objs) {
+      if (itemsById[i.id]?.zoneSide === 'right') rightSum += i.weight;
+      else leftSum += i.weight;
+    }
+    perZone.push({ id: z.id, name: z.name, weight: zw, vol: objs.reduce((a, i) => a + Math.max(1, Math.round(i.volume ?? 1)), 0) });
+  }
+  if (W === W0) return rep; // rien en étagère
+  const cx = sumX / W, cy = sumY / W;
+  const leftRightPct = Math.abs(cx - midX) / ((cols - 1) / 2 || 1) * 100;
+  const frontBackPct = (cy - midY) / ((rows - 1) / 2 || 1) * 100;
+  const loadPct = veh.payloadKg > 0 ? (W / veh.payloadKg) * 100 : 0;
+  const lrScore = Math.max(0, 100 - leftRightPct * 1.6);
+  const fbScore = Math.max(0, 100 - Math.abs(frontBackPct) * 0.9);
+  const balanceScore = Math.round(Math.min(lrScore, fbScore * 1.05));
+  let status, color;
+  if (loadPct > 100) { status = 'SURCHARGE !'; color = 'danger'; }
+  else if (leftRightPct > 35) { status = 'Penche d’un côté ⚠️'; color = 'danger'; }
+  else if (leftRightPct > 20) { status = 'Déséquilibré (gauche/droite)'; color = 'warn'; }
+  else if (Math.abs(frontBackPct) > 40) { status = 'Trop vers l’arrière'; color = 'warn'; }
+  else if (loadPct >= 85) { status = 'Bien chargé ✓'; color = 'good'; }
+  else { status = 'Équilibré ✓'; color = 'good'; }
+  return {
+    ...rep,
+    weightTotal: W, loadPct: Math.min(loadPct, 999),
+    leftRightPct, frontBackPct, balanceScore, status, color,
+    overPayload: W > veh.payloadKg,
+    groundWeight: W0, zoneWeight: W - W0, perZone,
+  };
+}
+
 // ── Optimisation automatique ─────────────────────────────────────────────────
 // Heuristique : tri par poids décroissant (LPT), puis pour chaque objet on choisit
 // la case libre qui minimise un coût d'équilibre :

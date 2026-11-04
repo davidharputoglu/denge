@@ -40,12 +40,18 @@
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ---------- seuil d'Otsu sur un histogramme de luminance 256 niveaux ----------
+// Otsu classique + post-traitement : quand le maximum de variance inter-classe
+// est atteint dès le premier seuil possible (cas dégénéré des histogrammes à
+// deux modes exacts, ex. fond 200 / objets 40), on replace le seuil au MILIEU
+// du creux entre les deux modes dominants — sinon le seuillage « < thr » ne
+// voit aucun objet.
 export function otsuThreshold(hist) {
   const total = hist.reduce((a, b) => a + b, 0);
   if (!total) return 128;
   let sum = 0;
   for (let i = 0; i < 256; i++) sum += i * hist[i];
   let sumB = 0, wB = 0, maxVar = -1, thr = 128;
+  let firstMaxT = null;
   for (let t = 0; t < 256; t++) {
     wB += hist[t];
     if (wB === 0) continue;
@@ -54,20 +60,57 @@ export function otsuThreshold(hist) {
     sumB += t * hist[t];
     const mB = sumB / wB, mF = (sum - sumB) / wF;
     const between = wB * wF * (mB - mF) * (mB - mF);
-    if (between > maxVar) { maxVar = between; thr = t; }
+    if (between > maxVar + 1e-9) { maxVar = between; thr = t; if (firstMaxT === null) firstMaxT = t; }
+  }
+  // Seuil « au milieu du creux » : sur une photo, l'histogramme n'est jamais
+  // parfaitement bimodal (bruit, ombres). On cherche donc le PLUS GRAND vide
+  // de masse entre deux valeurs non nulles — c'est là que passe la frontière
+  // objet/fond. S'il est ambigu (photo uniforme), on garde le thr d'Otsu.
+  const nz = [];
+  for (let i = 0; i < 256; i++) if (hist[i] > 0) nz.push(i);
+  let gapLo = null, gapHi = null, gapBest = 0;
+  for (let k = 1; k < nz.length; k++) {
+    const a = nz[k - 1], b = nz[k];
+    const massBetween = (() => { let s = 0; for (let i = a + 1; i < b; i++) s += hist[i]; return s; })();
+    const empty = b - a - 1;           // largeur du creux vide
+    const score = empty + (massBetween === 0 ? 0 : -Math.max(0, 8 - empty));
+    if (b - a >= 3 && massBetween <= total * 0.02 && score > gapBest) {
+      gapBest = score; gapLo = a; gapHi = b;
+    }
+  }
+  if (gapLo !== null && gapHi !== null) {
+    // seuil au milieu ; pour un creux clair/sombre renversé, idem
+    thr = Math.round((gapLo + gapHi) / 2);
+  } else if (nz.length >= 2) {
+    const peaks = hist.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]);
+    const p1 = peaks[0], p2 = peaks[1];
+    if (p1 && p2 && p1[0] + p2[0] >= total * 0.98 && p1[1] !== p2[1]) {
+      const lo = Math.min(p1[1], p2[1]), hi = Math.max(p1[1], p2[1]);
+      if (hi - lo > 1 && thr <= lo + 1) thr = Math.round((lo + hi) / 2);
+    }
   }
   return thr;
 }
 
 // ---------- grille de cases : chaque case = 1 si majoritairement « objet » ----
+// Le mode « objet » est déterminé par la masse de part et d'autre du seuil :
+// sur une photo de chantier, les objets sont généralement PLUS SOMBRES que le
+// sol → on compte les pixels < thr. Si l'inverse domine nettement (objets
+// clairs sur sol sombre), on compte les pixels > thr. Fini le critère
+// « écart ≤ 60 » qui ratait les objets très sombres sur sol clair.
 export function classifyCells(lum, W, H, cell) {
-  // histogramme global → seuil Otsu
   const hist = new Array(256).fill(0);
   for (let i = 0; i < lum.length; i++) hist[lum[i]]++;
   const thr = otsuThreshold(hist);
-  // contraste trop faible (photo uniforme) → rien à segmenter
-  let spread = 0, n = 0;
-  for (let i = 0; i < 256; i++) if (hist[i]) { spread++; n++; }
+  let n = 0;
+  for (let i = 0; i < 256; i++) if (hist[i]) n++;
+  // côté majoritaire hors fond ?
+  let below = 0, above = 0;
+  for (let i = 0; i < 256; i++) {
+    if (i < thr) below += hist[i];
+    else if (i > thr) above += hist[i];
+  }
+  const darkMode = below >= above; // objets sombres → pixels < thr
   const cols = Math.floor(W / cell), rows = Math.floor(H / cell);
   const grid = [];
   for (let r = 0; r < rows; r++) {
@@ -77,19 +120,19 @@ export function classifyCells(lum, W, H, cell) {
       for (let y = r * cell; y < Math.min((r + 1) * cell, H); y += 2)
         for (let x = c * cell; x < Math.min((c + 1) * cell, W); x += 2) {
           cnt++;
-          if (Math.abs(lum[y * W + x] - thr) <= 60 && lum[y * W + x] !== thr) {
-            // « objet » = écart fort avec le fond : soit plus sombre, soit plus clair
-            obj++;
-          }
+          const v = lum[y * W + x];
+          if (darkMode ? v < thr : v > thr) obj++;
         }
       row.push(cnt && obj / cnt > 0.55 ? 1 : 0);
     }
     grid.push(row);
   }
-  return { grid, thr, usable: n > 24 };
+  return { grid, thr, usable: n > 2 };
 }
 
 // ---------- connected components (flood fill 4-voisins) -----------------------
+// 4-voisins : deux objets posés côte à côte ne se touchent que par leurs coins
+// en diagonale sur la grille — ils doivent rester DEUX silhouettes distinctes.
 export function findBlobs(grid) {
   const rows = grid.length, cols = grid[0]?.length ?? 0;
   const seen = grid.map(r => r.map(() => false));
@@ -112,6 +155,44 @@ export function findBlobs(grid) {
     blobs.push(cellsList);
   }
   return blobs;
+}
+
+// Fusionne les fragments d'un MÊME objet : une pelle posée en biais découpe des
+// cases qui ne se touchent qu'en diagonale. On regroupe deux blobs si leurs
+// boîtes englobantes se chevauchent (à ±1 case près) ET qu'au moins une paire
+// de leurs cases est diagonale-adjacente → un seul outil reconnu.
+export function mergeDiagonalBlobs(blobs) {
+  const info = blobs.map(cells => {
+    const ys = cells.map(p => p[0]), xs = cells.map(p => p[1]);
+    return {
+      cells,
+      minR: Math.min(...ys), maxR: Math.max(...ys),
+      minC: Math.min(...xs), maxC: Math.max(...xs),
+      set: new Set(cells.map(([r, c]) => `${r},${c}`)),
+    };
+  });
+  const parent = info.map((_, i) => i);
+  const find = (i) => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const diagTouch = (a, b) => {
+    // boîtes englobantes proches (≤ 1 case d'écart)
+    if (a.minR > b.maxR + 1 || b.minR > a.maxR + 1) return false;
+    if (a.minC > b.maxC + 1 || b.minC > a.maxC + 1) return false;
+    for (const [r, c] of a.cells) {
+      if (b.set.has(`${r - 1},${c - 1}`) || b.set.has(`${r - 1},${c + 1}`) ||
+          b.set.has(`${r + 1},${c - 1}`) || b.set.has(`${r + 1},${c + 1}`)) return true;
+    }
+    return false;
+  };
+  for (let i = 0; i < info.length; i++)
+    for (let j = i + 1; j < info.length; j++)
+      if (diagTouch(info[i], info[j])) parent[find(j)] = find(i);
+  const groups = new Map();
+  info.forEach((it, i) => {
+    const root = find(i);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root).push(...it.cells);
+  });
+  return [...groups.values()];
 }
 
 // ---------- géométrie d'un blob ----------------------------------------------
@@ -232,6 +313,7 @@ export function detectFromImageData(imgData, opts = {}) {
     lum[p] = y; hist[y]++;
   }
   const { grid, thr, usable } = classifyCells(lum, W, H, cellPx);
+  // « usable » : photo uniforme (1 seul niveau de gris) → rien à segmenter.
   if (!usable || !grid.length || !grid[0].length) return { objects: [], note: 'lowcontrast' };
 
   // Filet de sécurité : si le seuillage par luminance ne trouve RIEN (contre-
@@ -250,7 +332,9 @@ export function detectFromImageData(imgData, opts = {}) {
     if (alt.usable && findBlobs(alt.grid).some(b => b.length >= 2)) workGrid = alt.grid;
   }
 
-  const blobs = findBlobs(workGrid).filter(b => b.length >= 2); // ignore le bruit
+  // Blobs 4-voisins → fusion des fragments diagonaux (outil posé en biais)
+  // → filtrage du bruit (silhouette d'1 case ignorée).
+  const blobs = mergeDiagonalBlobs(findBlobs(workGrid)).filter(b => b.length >= 2);
   if (!blobs.length) return { objects: [], note: 'noblobs' };
 
   // ÉCHELLE : 1) objet-étalon familier détecté (sac, seau, pelle…) → précise ;
