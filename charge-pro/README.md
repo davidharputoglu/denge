@@ -105,3 +105,26 @@ faut une clé de signature pour le Play Store) et un TWA charge l'app depuis
 l'URL hébergée — prévoyez donc l'hébergement. Pour une app 100 % autonome
 sans serveur, la voie est Capacitor + Android Studio (build local ou dans
 Actions avec l'action `react-native-android-build-apk`/`setup-java` + Gradle).
+
+## 🎨 Identité visuelle (logo, icônes, favicon)
+
+Le logo **Tepsi** représente un plateau (tepsi) vu de dessus, chargé d'objets
+de chantier et parfaitement équilibré sur son fulcrum — exactement le rôle de
+l'application.
+
+Tous les fichiers sont **générés par script** (aucune dépendance externe, 100 % local) :
+
+```bash
+python3 scripts/gen-logo.py   # régénère tout en 2 secondes
+```
+
+| Fichier (`public/`)        | Usage                                        |
+|----------------------------|----------------------------------------------|
+| `logo.png` (1024 px)       | Logo maître, affiché dans l'en-tête de l'app |
+| `icon-192.png`             | Icône PWA (Android, écran d'accueil)         |
+| `icon-512.png`             | Icône PWA + `maskable` (Play Store / TWA)    |
+| `apple-touch-icon.png`     | iOS / iPad                                   |
+| `favicon.png`              | Onglet du navigateur                           |
+
+Pour changer les couleurs du branding : éditer le dictionnaire `C` en haut de
+`scripts/gen-logo.py`, relancer le script, puis `npm run build`.
