@@ -4,6 +4,10 @@
 Usage :
     python3 scripts/import-logo.py chemin/vers/votre-image.png
 
+Si vous ne pouvez pas envoyer l'image dans le chat, déposez-la simplement
+dans le dossier /workspace (ou n'importe où sur la machine) et donnez-moi
+son chemin — je lancerai l'import pour vous.
+
 Ce que le script fait automatiquement :
   1. Redimensionne en logo.png (1024x1024, carré centré) -> affiché dans l'app
   2. icon-192.png et icon-512.png   -> icônes Android / PWA (Play Store)
