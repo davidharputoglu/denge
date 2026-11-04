@@ -5,7 +5,7 @@ name: Build Android APK
 # push sur main, et livre le fichier .apk en téléchargement.
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   workflow_dispatch: {}   # permet aussi de lancer le build manuellement
 
 jobs:
