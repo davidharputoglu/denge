@@ -104,4 +104,9 @@ if __name__ == "__main__":
         save_icon(master, n, os.path.join(pub, f"icon-{n}.png"))    # icônes PWA/Android
     save_icon(master, 180, os.path.join(pub, "apple-touch-icon.png"), pad=0.02)
     save_icon(master, 64, os.path.join(pub, "favicon.png"), pad=0.0)
+    # Variante maskable Android : contenu réduit à ~80 % sur fond uni (safe-zone)
+    mk = Image.new("RGBA", (512, 512), (15, 23, 42, 255))
+    inner = master.resize((410, 410), Image.LANCZOS)
+    mk.alpha_composite(inner, (51, 51))
+    mk.save(os.path.join(pub, "icon-maskable-512.png"))
     print("OK:", sorted(os.listdir(pub)))

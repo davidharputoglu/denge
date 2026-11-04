@@ -106,6 +106,24 @@ l'URL hébergée — prévoyez donc l'hébergement. Pour une app 100 % autonome
 sans serveur, la voie est Capacitor + Android Studio (build local ou dans
 Actions avec l'action `react-native-android-build-apk`/`setup-java` + Gradle).
 
+## 🖼️ Importer VOTRE propre logo / icône / favicon
+
+Si vous préférez votre propre image à celle générée par défaut :
+
+```bash
+python3 scripts/import-logo.py chemin/vers/votre-image.png
+npm run build
+```
+
+Le script découpe/redimensionne automatiquement aux **6 formats requis** :
+`logo.png` (1024), `icon-192.png`, `icon-512.png`, `icon-maskable-512.png`
+(variante Android avec safe-zone 80 % — indispensable pour les lanceurs
+d'apps qui rognent les bords), `apple-touch-icon.png` (180) et `favicon.png` (64).
+
+Formats acceptés : PNG (transparent si possible), JPG, WEBP. Conseil : une
+image carrée ≥ 1024 px donne le meilleur résultat. Pour revenir au logo
+généré par défaut : `python3 scripts/gen-logo.py`.
+
 ## 🏷️ Nom & disponibilité sur le Google Play Store
 
 Vérification automatisée des 12 premiers résultats de recherche Play (France) — novembre 2026 :
