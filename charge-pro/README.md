@@ -106,6 +106,31 @@ l'URL hébergée — prévoyez donc l'hébergement. Pour une app 100 % autonome
 sans serveur, la voie est Capacitor + Android Studio (build local ou dans
 Actions avec l'action `react-native-android-build-apk`/`setup-java` + Gradle).
 
+## 🏷️ Nom & disponibilité sur le Google Play Store
+
+Vérification automatisée des 12 premiers résultats de recherche Play (France) — novembre 2026 :
+
+| Nom turcique | Signification | Disponibilité Play | Verdict |
+|---|---|---|---|
+| **Tepsi** ✅ retenu | plateau large (le coffre comme un plateau équilibré) | aucun titre identique ; `com.tepsi.app` LIBRE | meilleur candidat |
+| **Küfe** | panier/cage en osier (rangement) | aucun titre identique | bon plan B |
+| **Töz** | souche/fondement (charger à la base, lourd au fond) | aucun titre identique | bon plan B |
+| **Denge** | équilibre | aucun titre identique | sémantique parfaite, mot très courant |
+| **Balgı** | estimation/mesure (poids estimé) | aucun titre identique | original |
+| **Çadır** | tente/bâche (bâchage de chargement) | aucun titre identique | évocateur chantier |
+| ⚠️ Bagaj | bagages/coffre | « Bagagici » existe | similarité risquée |
+| ⚠️ Kazan | chaudron / gagne | plusieurs jeux « Kazan… » | trop occupé |
+| ❌ Alp | héros | app « alp » existe | pris |
+| ❌ Yük | charge/fret | apps « yükCEPte » etc. | trop générique en turc |
+
+Relancer la vérification à tout moment :
+
+```bash
+python3 scripts/check-name-availability.py Tepsi Küfe Töz Denge
+```
+
+⚠️ *Indicatif uniquement* : le dépôt officiel du nom se fait via [Play Console](https://play.google.com/console) (25 € une fois). Pensez aussi à vérifier les marques déposées (INPI/EUIPO) si vous comptez commercialiser.
+
 ## 🎨 Identité visuelle (logo, icônes, favicon)
 
 Le logo **Tepsi** représente un plateau (tepsi) vu de dessus, chargé d'objets
