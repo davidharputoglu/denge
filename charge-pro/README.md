@@ -80,3 +80,24 @@ charge-pro/
 │   └── style.css         thème sombre mobile-first
 └── tests/engine.test.js  tests unitaires (node --test)
 ```
+
+## 📦 Générer l'APK avec GitHub (GitHub Actions)
+
+GitHub ne crée pas l'APK automatiquement, mais **GitHub Actions** (intégré à
+chaque dépôt, gratuit pour les dépôts publics) le fait à votre place grâce au
+workflow `.github/workflows/android-apk.yml` :
+
+1. Poussez ce dépôt sur GitHub (`git push`).
+2. Hébergez la PWA (fichiers de `dist/`) sur un HTTPS gratuit : Netlify ou Vercel.
+3. Dans le dépôt GitHub : *Settings → Secrets and variables → Actions → Variables*
+   → ajoutez `PWA_URL` = `https://votre-site.exemple.com`.
+4. Chaque push sur `main` (ou bouton *Run workflow*) construit et livre :
+   - **pwa-dist** : le site à déployer ;
+   - **charge-pro-apk** : le fichier `.apk` (onglet Actions → Artifacts), prêt
+     à installer sur Android (*paramètres → installer des apps inconnues*).
+
+⚠️ Limites : cet APK est **non signé** (parfait pour tester en interne ; il
+faut une clé de signature pour le Play Store) et un TWA charge l'app depuis
+l'URL hébergée — prévoyez donc l'hébergement. Pour une app 100 % autonome
+sans serveur, la voie est Capacitor + Android Studio (build local ou dans
+Actions avec l'action `react-native-android-build-apk`/`setup-java` + Gradle).
