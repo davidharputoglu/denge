@@ -562,18 +562,17 @@ export function autoLoad(items, vehicle, gridDims = null) {
     }
   }
 
-  // NB : aucun « retrait d'objets pour forcer l'équilibre G/D » ici : la répartition
-  // est garantie en amont (meilleur sous-ensemble équilibrable) puis corrigée à
-  // l'étape C ci-dessous. Retirer à l'aveugle vidait le coffre sur les petits
-  // véhicules (ex. break 300 kg avec [250,200,100,50] → un seul objet placé).
-
-  for (let i = 0; i < nItems; i++) if (!(chosenMask & (1 << i))) skipped.push(sorted[i]);
-  // évite les doublons dans skipped (retirés par équilibrage déjà poussés)
-  const seenSkip = new Set();
-  for (let k = skipped.length - 1; k >= 0; k--) {
-    if (seenSkip.has(skipped[k].id)) skipped.splice(k, 1);
-    else seenSkip.add(skipped[k].id);
-  }
+  // ── Repositionnement final « meilleur de deux mondes » ─────────────────────
+  // Le placement glouton séquentiel minimise le barycentre À CHAQUE ÉTAPE mais
+  // ne garantit pas l'optimum GLOBAL : ex. break 300 kg, grille 2×3, objets
+  // {200, 100} → l'algo pose 200 au centre-gauche puis 100 collé à droite
+  // (barycentre 0,83 vs cible 0,5 ⇒ 33 % de décalage latéral), alors que
+  // 200 derrière à gauche et 100 devant à droite donne un écart nul (150/150).
+  // Solution : si le résultat est déséquilibré (> 20 % G/D ou > 40 % AV/AR),
+  // on réessaie des ordres de pose alternatifs (poids ascendant, puis toutes
+  // les permutations si ≤ 6 objets) et on garde le meilleur score RÉEL, calculé
+  // avec analyze() — la même physique que celle affichée à l'utilisateur.
+  // Déterministe ; aucun coût sur les cas déjà équilibrés.
 
   let pendingW = toPlace.reduce((a, x) => a + x.weight, 0);
   for (const it of toPlace) {
@@ -691,6 +690,115 @@ export function autoLoad(items, vehicle, gridDims = null) {
     pendingW -= it.weight;
     usedVol += bestN;   // l'objet ne consomme que les cases de sa FORME
     placedIds.push(it.id);
+  }
+
+  // ── Repositionnement final « meilleur de deux mondes » (exécution) ─────────
+  // Si le glouton a laissé un déséquilibre, on teste des ORDRES DE POSE
+  // alternatifs et on garde le placement au meilleur score réel (analyze()).
+  const rep0 = analyze(grid, items, vehicle);
+  if (!singleSide && toPlace.length > 1 && toPlace.length <= 6 &&
+      (rep0.leftRightPct > 20 || Math.abs(rep0.frontBackPct) > 40)) {
+    const buildGrid = (order) => {
+      const g = makeGrid(cols, rows);
+      const cs = [];
+      for (let r = 0; r < rows; r++)
+        for (let c = 0; c < cols; c++) cs.push({ r, c, x: c + 0.5, y: r + 0.5, taken: false });
+      let w = 0, sx = 0, sy = 0, used = 0;
+      const put = [];
+      for (const it of order) {
+        if (w + it.weight > payload) continue;
+        const shapeCells = it.shape
+          ? it.shape.flat().reduce((a, v) => a + (v ? 1 : 0), 0)
+          : null;
+        const need = Math.max(1, shapeCells ?? Math.round(it.volume ?? 1));
+        if (used + need > totalCellVol) continue;
+        const freeAt = (r, c) => r < rows && c < cols && !cs[r * cols + c].taken;
+        const maskOf = (m) => {
+          if (it.shape) return m ? it.shape.map(r => [...r].reverse()) : it.shape;
+          const [h, ww] = footprintFor(it, cols, rows);
+          const base = Array.from({ length: h }, () => Array.from({ length: ww }, () => 1));
+          if (!m) return base;
+          return base[0].map((_, i) => base.map(row => row[i]));
+        };
+        const combos = [];
+        for (const mirrored of [false, true]) {
+          const mask = maskOf(mirrored);
+          if (mirrored && it.shape && JSON.stringify(mask) === JSON.stringify(it.shape)) break;
+          const hh = mask.length, ww = mask[0].length;
+          for (let r = 0; r + hh <= rows; r++) {
+            for (let c = 0; c + ww <= cols; c++) {
+              let ok = true; const combo = [];
+              for (let a = 0; a < hh && ok; a++) for (let b = 0; b < ww; b++) {
+                if (!mask[a][b]) continue;
+                if (!freeAt(r + a, c + b)) { ok = false; break; }
+                combo.push(cs[(r + a) * cols + (c + b)]);
+              }
+              if (ok) combos.push(combo);
+            }
+          }
+          if (it.shape) break;
+        }
+        if (!combos.length) continue;
+        const tx = cols / 2, ty = rows / 2;
+        let best = null, bestCost = Infinity;
+        for (const combo of combos) {
+          const nn = combo.length || 1;
+          const wp = it.weight / nn;
+          const cyCell = combo.reduce((a, cl) => a + cl.y, 0) / nn;
+          const sumCx = combo.reduce((a, cl) => a + cl.x, 0);
+          const bx = (sx + wp * sumCx) / Math.max(1e-9, w + it.weight);
+          const by = (sy + wp * combo.reduce((a, cl) => a + cl.y, 0)) / Math.max(1e-9, w + it.weight);
+          const lateral = Math.abs(bx - tx) / (tx || 1);
+          const longi = Math.abs(by - ty) / (ty || 1);
+          const heavyBack = (it.weight / payload) * Math.max(0, ty - cyCell) / (ty || 1) * 0.25;
+          const cost = lateral * 2 + lateral * lateral * 3 + longi * 0.6 + heavyBack;
+          if (cost < bestCost - 1e-9) { bestCost = cost; best = combo; }
+        }
+        if (!best) continue;
+        const wpc = it.weight / best.length;
+        for (const cl of best) {
+          cl.taken = true; g[cl.r][cl.c] = cl.takenId = it.id;
+          sx += wpc * cl.x; sy += wpc * cl.y;
+        }
+        w += it.weight; used += best.length; put.push(it.id);
+      }
+      return { grid: g, placed: put };
+    };
+    // critères : d'abord la penchaison G/D (danger n°1), puis AV/AR, puis poids chargé
+    const crit = (g) => {
+      const rp = analyze(g, items, vehicle);
+      return rp.balanceScore * 100000 + rp.weightTotal * 100
+        - Math.abs(rp.frontBackPct);
+    };
+    // On ne remplace le glouton que si le résultat alternatif est VRAIMENT
+    // équilibré (sinon on garde le glouton : il maximise la charge). Ex. grille
+    // 3×4 avec trois objets de 400 kg : tout placement correct donne un écart
+    // incompressible de 25 % — changer d'ordre ne ferait que retirer un objet.
+    const isBalanced = (g) => {
+      const rp = analyze(g, items, vehicle);
+      return rp.leftRightPct <= 20 && Math.abs(rp.frontBackPct) <= 40;
+    };
+    const orders = [[...toPlace].reverse()];               // poids ascendant
+    const perms = (arr) => {                               // toutes permutations (≤ 6 !)
+      if (arr.length <= 1) return [arr];
+      const out = [];
+      arr.forEach((x, i) => {
+        const rest = [...arr.slice(0, i), ...arr.slice(i + 1)];
+        for (const p of perms(rest)) out.push([x, ...p]);
+      });
+      return out;
+    };
+    if (toPlace.length <= 6) orders.push(...perms(toPlace));
+    let bestG = null, bestC = -Infinity;
+    for (const od of orders) {
+      const cand = buildGrid(od);
+      if (!isBalanced(cand.grid)) continue;               // rejet : pas mieux qu'un penché
+      const cc = crit(cand.grid);
+      if (cc > bestC + 1e-9) { bestC = cc; bestG = cand.grid; }
+    }
+    if (bestG !== null) {
+      return { grid: bestG, placed: placedIds.filter(id => bestG.some(row => row.includes(id))), skipped };
+    }
   }
 
   return { grid, placed: placedIds, skipped };
