@@ -6,8 +6,8 @@ export default defineConfig({
     VitePWA({
       registerType: 'autoUpdate',
       manifest: {
-        name: 'Tepsi — Chargement équilibré',
-        short_name: 'Tepsi',
+        name: 'Denge — Chargement équilibré',
+        short_name: 'Denge',
         description: 'Où placer chaque objet pour charger au maximum sans faire pencher le véhicule',
         theme_color: '#0f172a',
         background_color: '#0f172a',

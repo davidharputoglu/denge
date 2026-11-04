@@ -1,6 +1,6 @@
-# 🧺 Tepsi — Chargement équilibré des véhicules de chantier
+# ⚖️ Denge — Chargement équilibré des véhicules de chantier
 
-> **Tepsi** (du turc « tepsi », plateau large et plat) : l'app qui transforme le coffre
+> **Denge** (du turc « denge », équilibre) : l'app qui transforme le coffre
 > de votre camionnette en plateau parfaitement chargé et équilibré. Nom d'origine turcique,
 > comme les autres mots turcs passés en français : bazar, kiosque, divan, ottoman, turban.
 
@@ -75,7 +75,7 @@ npm test    # 8 tests : équilibre, charge max, surcharge détectée, cases plei
 ## 📁 Structure
 
 ```
-tepsi/
+denge/
 ├── index.html            point d'entrée (+ enregistrement du service worker)
 ├── vite.config.js        config PWA (manifest, icônes, offline)
 ├── src/
@@ -97,7 +97,7 @@ workflow `.github/workflows/android-apk.yml` :
    → ajoutez `PWA_URL` = `https://votre-site.exemple.com`.
 4. Chaque push sur `main` (ou bouton *Run workflow*) construit et livre :
    - **pwa-dist** : le site à déployer ;
-   - **tepsi-apk** : le fichier `.apk` (onglet Actions → Artifacts), prêt
+   - **denge-apk** : le fichier `.apk` (onglet Actions → Artifacts), prêt
      à installer sur Android (*paramètres → installer des apps inconnues*).
 
 ⚠️ Limites : cet APK est **non signé** (parfait pour tester en interne ; il
@@ -112,7 +112,8 @@ Vérification automatisée des 12 premiers résultats de recherche Play (France)
 
 | Nom turcique | Signification | Disponibilité Play | Verdict |
 |---|---|---|---|
-| **Tepsi** ✅ retenu | plateau large (le coffre comme un plateau équilibré) | aucun titre identique ; `com.tepsi.app` LIBRE | meilleur candidat |
+| **Denge** ✅ RETENU | « équilibre » en turc — la fonction n°1 de l'app | aucun titre identique sur Play FR | nom officiel de l'app |
+| ~~Tepsi~~ | plateau large | libre aussi | écarté au profit de Denge |
 | **Küfe** | panier/cage en osier (rangement) | aucun titre identique | bon plan B |
 | **Töz** | souche/fondement (charger à la base, lourd au fond) | aucun titre identique | bon plan B |
 | **Denge** | équilibre | aucun titre identique | sémantique parfaite, mot très courant |
@@ -126,14 +127,14 @@ Vérification automatisée des 12 premiers résultats de recherche Play (France)
 Relancer la vérification à tout moment :
 
 ```bash
-python3 scripts/check-name-availability.py Tepsi Küfe Töz Denge
+python3 scripts/check-name-availability.py Denge Tepsi Küfe Töz
 ```
 
 ⚠️ *Indicatif uniquement* : le dépôt officiel du nom se fait via [Play Console](https://play.google.com/console) (25 € une fois). Pensez aussi à vérifier les marques déposées (INPI/EUIPO) si vous comptez commercialiser.
 
 ## 🎨 Identité visuelle (logo, icônes, favicon)
 
-Le logo **Tepsi** représente un plateau (tepsi) vu de dessus, chargé d'objets
+Le logo **Denge** représente un plateau vu de dessus, chargé d'objets
 de chantier et parfaitement équilibré sur son fulcrum — exactement le rôle de
 l'application.
 

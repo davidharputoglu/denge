@@ -37,14 +37,14 @@ jobs:
         env:
           # URL où sera hébergée la PWA (Netlify/Vercel gratuit, ou votre serveur).
           # L'APK TWA embarque cette URL : l'app s'ouvre dessus, en plein écran.
-          PWA_URL: ${{ vars.PWA_URL || 'https://tepsi.example.com' }}
+          PWA_URL: ${{ vars.PWA_URL || 'https://denge.example.com' }}
         run: |
           npx --yes @bubblewrap/cli init \
             --manifest "${PWA_URL}/manifest.webmanifest" \
-            --package-id com.tepsi.app --app-name "Tepsi" --user-app
+            --package-id com.denge.app --app-name "Denge" --user-app
           npx --yes @bubblewrap/cli build \
             --o app-release-unsigned.apk --skip-pwa-checks
       - uses: actions/upload-artifact@v4
         with:
-          name: tepsi-apk
+          name: denge-apk
           path: app-release-unsigned.apk

@@ -55,7 +55,7 @@ function render() {
 
   app.innerHTML = `
     <header>
-      <h1><img class="logo" src="/logo.png" alt="" width="34" height="34" /> Tepsi</h1>
+      <h1><img class="logo" src="/logo.png" alt="" width="34" height="34" /> Denge</h1>
       <p>Charger au maximum — sans faire pencher le véhicule</p>
     </header>
 

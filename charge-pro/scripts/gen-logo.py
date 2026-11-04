@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Génère le logo / icônes / favicon de Tepsi (Pillow, 100% local).
+"""Génère le logo / icônes / favicon de Denge (Pillow, 100% local).
 
 Concept : un « tepsi » (plateau) vu de dessus, chargé d'objets de chantier
 et parfaitement équilibré sur son fulcrum — plateau ambre, caisse bleue,
