@@ -1,4 +1,8 @@
-# 🚚 Charge Pro — Chargement équilibré des véhicules de chantier
+# 🧺 Tepsi — Chargement équilibré des véhicules de chantier
+
+> **Tepsi** (du turc « tepsi », plateau large et plat) : l'app qui transforme le coffre
+> de votre camionnette en plateau parfaitement chargé et équilibré. Nom d'origine turcique,
+> comme les autres mots turcs passés en français : bazar, kiosque, divan, ottoman, turban.
 
 Application mobile (PWA installable sur Android) qui dit **où placer chaque objet** dans le coffre
 d'une camionnette / fourgon / pick-up pour :
@@ -71,7 +75,7 @@ npm test    # 8 tests : équilibre, charge max, surcharge détectée, cases plei
 ## 📁 Structure
 
 ```
-charge-pro/
+tepsi/
 ├── index.html            point d'entrée (+ enregistrement du service worker)
 ├── vite.config.js        config PWA (manifest, icônes, offline)
 ├── src/
@@ -93,7 +97,7 @@ workflow `.github/workflows/android-apk.yml` :
    → ajoutez `PWA_URL` = `https://votre-site.exemple.com`.
 4. Chaque push sur `main` (ou bouton *Run workflow*) construit et livre :
    - **pwa-dist** : le site à déployer ;
-   - **charge-pro-apk** : le fichier `.apk` (onglet Actions → Artifacts), prêt
+   - **tepsi-apk** : le fichier `.apk` (onglet Actions → Artifacts), prêt
      à installer sur Android (*paramètres → installer des apps inconnues*).
 
 ⚠️ Limites : cet APK est **non signé** (parfait pour tester en interne ; il

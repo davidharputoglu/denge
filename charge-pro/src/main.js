@@ -55,7 +55,7 @@ function render() {
 
   app.innerHTML = `
     <header>
-      <h1>🚚 Charge Pro</h1>
+      <h1>🧺 Tepsi</h1>
       <p>Charger au maximum — sans faire pencher le véhicule</p>
     </header>
 
