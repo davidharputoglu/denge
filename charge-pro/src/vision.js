@@ -182,6 +182,44 @@ export function classifyBlob(st, scaleCmPerCell) {
     shapeHint: 'auto', weightRange: [5, 60], confidence: 0.35 };
 }
 
+// ---------- détection d'objets-ÉTALONS familiers (remplace la feuille A4) ----
+// Personne ne promène une feuille A4 sur un chantier. Mais il y a presque
+// TOUJOURS dans le champ de la photo un objet dont la taille réelle est connue
+// de tous : un sac de ciment (~35 cm posé à plat), un seau de chantier
+// (~28 cm), une bêche (~47 cm), une bouteille d'eau (~23 cm), une brique.
+// Astuce : les SURFACES RELATIVES des silhouettes ne dépendent ni de la
+// distance ni de l'échelle. Avec l'échelle grossière (« plus gros blob ≈ 1 m »),
+// on cherche une silhouette compacte dont la taille estimée tombe dans la
+// fenêtre d'un étalon connu (±30 %) ; si oui, on corrige l'échelle avec sa
+// taille réelle exacte. Résultat : pas besoin de rien poser par terre.
+export const NATURAL_SCALES = [
+  { name: 'brique',              icon: '🧱', cm: 10 }, // parpaing standard, bord de chantier
+  { name: 'sac de ciment',       icon: '🧱', cm: 35 }, // posé à plat, ~35 cm de large
+  { name: 'pelle / bêche',       icon: '⛏️', cm: 47 }, // fer + manche court posé
+  { name: 'seau de 10 litres',   icon: '🪣', cm: 28 }, // diamètre universel du chantier
+  { name: 'bouteille d’eau 1 L', icon: '🍾', cm: 23 }, // hauteur debout ≈ 23 cm
+];
+
+export function detectNaturalScale(statsList, scaleCmPerCell) {
+  if (!statsList.length || !scaleCmPerCell) return null;
+  let best = null;
+  for (const st of statsList) {
+    if (st.elongation > 1.45) continue;                 // uniquement les silhouettes compactes
+    const dimMaxCells = Math.max(st.bboxH, st.bboxW);
+    const dimMinCells = Math.min(st.bboxH, st.bboxW);
+    if (dimMaxCells < 2 || dimMinCells / dimMaxCells < 0.55) continue; // trop petit / pas carré
+    const realDimMax = dimMaxCells * scaleCmPerCell;    // taille estimée avec l'échelle grossière
+    for (const ref of NATURAL_SCALES) {
+      const err = Math.abs(Math.log(realDimMax / ref.cm)); // écart relatif (tolère ±35 %)
+      if (err > 0.35) continue;
+      const cand = { scale: ref.cm / dimMaxCells, ref, err };
+      if (!best || cand.err < best.err) best = cand;
+    }
+  }
+  if (!best) return null;
+  return { scaleCmPerCell: Math.round(best.scale * 10) / 10, ref: best.ref };
+}
+
 // ---------- pipeline complet : ImageData → objets candidats -------------------
 export function detectFromImageData(imgData, opts = {}) {
   const { cellPx = 28, knownScaleCm = null } = opts;
@@ -199,18 +237,26 @@ export function detectFromImageData(imgData, opts = {}) {
   const blobs = findBlobs(grid).filter(b => b.length >= 2); // ignore le bruit
   if (!blobs.length) return { objects: [], note: 'noblobs' };
 
-  // ÉCHELLE : feuille A4 détectée → exacte ; sinon étalon « plus gros blob ≈ 1 m »
+  // ÉCHELLE : 1) objet-étalon familier détecté (sac, seau, pelle…) → précise ;
+  //          2) sinon étalon implicite « plus gros blob ≈ 1 m » → estimée.
   let scaleCmPerCell = knownScaleCm ?? null;
-  let scaleSource = knownScaleCm ? 'A4' : 'estimee';
+  let scaleSource = knownScaleCm ? 'etalon-manuel' : 'estimee';
+  let scaleRef = null;
+  const statsList = blobs.map(blobStats);
   if (!scaleCmPerCell) {
-    const maxCells = Math.max(...blobs.map(b => Math.max(
-      ...[Math.max(...b.map(p => p[0])) - Math.min(...b.map(p => p[0])) + 1,
-          Math.max(...b.map(p => p[1])) - Math.min(...b.map(p => p[1])) + 1])));
-    scaleCmPerCell = 100 / Math.max(1, maxCells); // plus grand objet ≈ 100 cm
+    const maxCells = Math.max(...statsList.map(st => Math.max(st.bboxH, st.bboxW)));
+    const guess = 100 / Math.max(1, maxCells); // plus grand objet ≈ 100 cm
+    const nat = detectNaturalScale(statsList, guess);
+    if (nat) {
+      scaleCmPerCell = nat.scaleCmPerCell;
+      scaleSource = 'etalon';
+      scaleRef = nat.ref;
+    } else {
+      scaleCmPerCell = guess;
+    }
   }
 
-  const objects = blobs.map(cellsList => {
-    const st = blobStats(cellsList);
+  const objects = statsList.map((st, i) => {
     const cls = classifyBlob(st, scaleCmPerCell);
     const footprintCm = {
       w: Math.round(st.bboxW * scaleCmPerCell),
@@ -220,18 +266,39 @@ export function detectFromImageData(imgData, opts = {}) {
     const volCells = Math.max(1, Math.round((footprintCm.w / 45) * (footprintCm.h / 60)));
     return {
       stats: st, ...cls, footprintCm, volCells,
-      cells: cellsList, // positions brutes (cases image) pour dessin overlay
+      cells: blobs[i], // positions brutes (cases image) pour dessin overlay
     };
   }).sort((a, b) => b.stats.area - a.stats.area);
 
-  return { objects, scaleCmPerCell: Math.round(scaleCmPerCell * 10) / 10, scaleSource, gridDims: [grid.length, grid[0].length] };
+  return { objects, scaleCmPerCell: Math.round(scaleCmPerCell * 10) / 10, scaleSource, scaleRef, gridDims: [grid.length, grid[0].length] };
 }
 
 // ---------- mémoire locale : silhouettes déjà confirmées ----------------------
-// Signature grossière (kind + taille arrondie) → poids confirmé la dernière fois.
+// LA SIGNATURE EST BASÉE SUR L'ENCOMBREMENT RÉEL EN CENTIMÈTRES, PAS SUR LES
+// PIXELS. Conséquence directe du problème « 1,5 L vs 0,5 L » :
+//   • bouteille de 1,5 L ≈ 30 cm de haut → palier « grand » ;
+//   • bouteille de 0,5 L ≈ 20 cm        → palier « moyen » ;
+// tailles réelles différentes ⇒ signatures différentes ⇒ le poids mémorisé
+// du 1,5 L NEST PAS appliqué au 0,5 L : l'app redemande (une seule fois).
+// Inversement, la MÊME bétonnière photographiée de plus loin garde le même
+// encombrement réel en cm ⇒ même palier ⇒ poids repris automatiquement.
+export function sizeTier(cm) {
+  // paliers grossiers mais robustes (± facteur ~1.6 entre chaque cran)
+  if (cm < 15) return 0;   // très petit : brique, bouteille 0,5 L, outillage main
+  if (cm < 30) return 1;   // petit : seau, sac posé, bouteille 1,5 L couchée
+  if (cm < 50) return 2;   // moyen : bac à mortier, gaz butane, pied-de-biche
+  if (cm < 80) return 3;   // gros : bétonnière, fût, caisse roulante
+  if (cm < 140) return 4;  // très gros : palette, touret, panneau
+  return 5;                // hors norme
+}
+
 export function signatureOf(obj) {
   const s = obj.stats;
-  return `${obj.kind}|${s.area}|${Math.round(s.elongation * 2) / 2}`;
+  // dimension réelle max (cm) si l'échelle est connue dans le résultat de scan
+  const dimMaxCm = obj.footprintCm
+    ? Math.max(obj.footprintCm.w, obj.footprintCm.h)
+    : Math.max(s.bboxH, s.bboxW) * 10; // secours : échelle arbitraire
+  return `${obj.kind}|T${sizeTier(dimMaxCm)}|${Math.round(s.elongation * 2) / 2}`;
 }
 
 export function matchMemory(objects, memory) {

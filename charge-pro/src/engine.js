@@ -368,7 +368,42 @@ export function autoLoad(items, vehicle, gridDims = null) {
     return bestMask;
   }
 
-  const chosenMask = bestSubset();
+  // ── Sous-ensemble équilibrable au POIDS : si la meilleure partition G/D du
+  // choix dépasse ~12 % de la charge utile, on remplace le choix par le meilleur
+  // sous-ensemble QUI LUI est équilibrable (recherche gloutonne + améliorations).
+  // Exemple concret : break 300 kg, objets [250, 200, 100, 50]. Le max absolu
+  // est {250, 50} = 300 kg — mais 250 d'un côté et 50 de l'autre ⇒ ça penche.
+  // Mieux vaut {200, 100} = 300 kg répartis 150/150 : même charge, stable.
+  const gapOfList = (list) => {
+    if (!list.length) return 0;
+    const tot = Math.round(list.reduce((a, x) => a + x.weight, 0) * 10);
+    let dp = 1n;
+    for (const x of list) dp |= dp << BigInt(Math.max(1, Math.round(x.weight * 10)));
+    const half = Math.floor(tot / 2);
+    for (let j = half; j >= 0; j--) if ((dp >> BigInt(j)) & 1n) return tot - 2 * j;
+    return tot;
+  };
+  const maxGapTol = Math.max(50, Math.round(payload * 10 * 0.12)); // dixièmes de kg
+  const selOfMask = (m) => sorted.filter((_, i) => m & (1 << i));
+  let chosenMask = bestSubset();
+  if (gapOfList(selOfMask(chosenMask)) > maxGapTol && nItems <= 20) {
+    // recherche exacte du meilleur sous-ensemble « lourd ET équilibrable »
+    let mBest = 0, qBest = -Infinity;
+    for (let m = 1; m < (1 << nItems); m++) {
+      let w = 0, ok = true;
+      for (let i = 0; i < nItems; i++) if (m & (1 << i)) {
+        w += sorted[i].weight;
+        if (w > payload) { ok = false; break; }
+      }
+      if (!ok || !fitsVol(m)) continue;
+      const s = selOfMask(m);
+      const gap = gapOfList(s);
+      if (gap > maxGapTol) continue;             // non équilibrable → rejeté
+      const q = w * 10000 - gap;
+      if (q > qBest) { qBest = q; mBest = m; }
+    }
+    if (mBest) chosenMask = mBest;              // sinon on garde le choix initial, l'étape C corrigera
+  }
   let toPlace = sorted.filter((_, i) => chosenMask & (1 << i));
 
   // ── Équilibrage gauche/droite AU POIDS, garanti ───────────────────────────
@@ -459,6 +494,8 @@ export function autoLoad(items, vehicle, gridDims = null) {
     // théorique » évite de sur-corriger l'équilibre avec le seul objet courant.
     const futureW = Math.max(0, pendingW - it.weight);
     const futLeft = futureW / 2, futRight = futureW / 2;
+    // lest théorique des cases vides restantes (surface homogène autour du centre)
+    const emptyW = Math.max(0, payload - W - pendingW);
     const xL = targetX / 2, xR = targetX + (cols - targetX) / 2; // centres des moitiés G/D
     const yF = targetY / 2, yB = targetY + (rows - targetY) / 2;
 
@@ -469,10 +506,10 @@ export function autoLoad(items, vehicle, gridDims = null) {
       const sumCx = combo.reduce((a, cl) => a + cl.x, 0);
       const wp = it.weight / nn;                    // poids par case OCCUPÉE
 
-      const nW = W + it.weight + futureW;
-      const bx = (sumX + wp * sumCx + futLeft * xL + futRight * xR) / nW;
+      const nW = W + it.weight + futureW + emptyW;
+      const bx = (sumX + wp * sumCx + futLeft * xL + futRight * xR + emptyW * targetX) / nW;
       const by = (sumY + wp * combo.reduce((a, cl) => a + cl.y, 0)
-                  + futureW * ((yF + yB) / 2)) / nW;
+                  + futureW * ((yF + yB) / 2) + emptyW * targetY) / nW;
 
       const lateral = Math.abs(bx - targetX) / (targetX || 1);   // penchaison G/D
       const longi   = Math.abs(by - targetY) / (targetY || 1);   // essieu AV/AR

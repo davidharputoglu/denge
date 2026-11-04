@@ -10,6 +10,15 @@ import { scanImageEl, matchMemory, signatureOf } from './vision.js';
 let state = loadState() ?? initialState();
 state.scanMemory ??= {};   // silhouettes déjà confirmées → poids connu
 state.lastScan ??= null;   // dernier résultat de scan photo (candidates)
+state.scanWeights ??= {};  // poids en cours d'édition sur le scan affiché
+// 📚 pré-remplissage intelligent : dès la première photo, si la silhouette
+// correspond à un objet du catalogue (bétonnière, butane, pelle…), l'app
+// propose SON poids réel — et le mémorise pour ce type de forme.
+if (!state.catalogPrimed) {
+  for (const [sig, w] of Object.entries(state.scanMemory)) {
+    if (w?.name) state.catalogPrimed = true; // mémoire déjà utilisée → inutile
+  }
+}
 let tab = 'charger'; // charger | scan | objets | véhicule
 let pendingCatalogPick = null; // suggestion catalogue acceptée → forme exacte reprise
 
@@ -338,8 +347,14 @@ function renderScan() {
     ? scan.objects.map((o, idx) => {
         const sig = signatureOf(o);
         const known = state.scanMemory[sig];
-        const estW = known ? known.weight : Math.round(((o.weightRange[0] + o.weightRange[1]) / 2) * 10) / 10;
-        const conf = known ? '✅ connu' : `${Math.round(o.confidence * 100)} %`;
+        const catHit = findCatalogMatch(o.label); // ex. « Bétonnière / fût » → 70 kg
+        const defW = known ? known.weight
+          : catHit ? catHit.weight
+          : Math.round(((o.weightRange[0] + o.weightRange[1]) / 2) * 10) / 10;
+        const estW = state.scanWeights?.[idx] ?? defW;
+        const conf = known ? '✅ connu'
+          : catHit ? `📚 catalogue (${catHit.name})`
+          : `${Math.round(o.confidence * 100)} %`;
         return `
         <div class="row cand">
           <span class="row-icon">${o.icon}</span>
@@ -349,7 +364,10 @@ function renderScan() {
             ${known ? '' : `<br><input class="w-adj" data-widx="${idx}" type="number" min="0.5" step="0.5"
                value="${estW}" style="width:90px" /> kg`}
           </span>
-          <button class="primary small" data-accept="${idx}">➕ Inventaire</button>
+          <span class="cand-btns">
+            <button class="ghost small" data-savew="${idx}" title="Mémoriser ce poids pour toutes les futures photos de ce type">💾 Poids</button>
+            <button class="primary small" data-accept="${idx}">➕ Inventaire</button>
+          </span>
         </div>`;
       }).join('')
     : '';
@@ -360,8 +378,9 @@ function renderScan() {
     <p class="hint">Posez les objets par terre, prenez-les en photo <b>de dessus</b>
     (vue verticale). L'app découpe l'image, repère chaque silhouette, estime sa
     taille et sa forme — puis propose un poids grâce au catalogue.</p>
-    <p class="hint">📏 <b>Pour une échelle exacte</b>, posez une feuille A4 à côté
-    des objets avant la photo. Sinon l'app estime (moins précis).</p>
+    <p class="hint">📏 <b>Pas besoin de règle ni de feuille A4</b> : s'il y a au
+    sol un objet dont la taille est connue (sac de ciment, seau, bêche,
+    bouteille d'eau…), l'app s'en sert d'étalon pour caler l'échelle en cm.</p>
     <label class="primary bigbtn">📷 Prendre une photo / choisir une image
       <input type="file" id="scan-file" accept="image/*" capture="environment" hidden />
     </label>
@@ -372,8 +391,10 @@ function renderScan() {
   <section class="card">
     <h2>Résultat du scan (${scan.objects.length} objet(s) vu(s))</h2>
     <img class="scan-preview" src="${scan.previewUrl}" alt="photo analysée" />
-    <p class="hint">Échelle : ${scan.scaleSource === 'A4' ? 'exacte (feuille A4 détectée)'
-      : `estimée (~${scan.scaleCmPerCell} cm par pixel-analyse)`}.
+    <p class="hint">Échelle : ${scan.scaleSource === 'etalon'
+      ? `<b>${scan.scaleRef?.icon ?? '📏'} étalon « ${scan.scaleRef?.name ?? 'objet familier'} » détecté</b> (~${scan.scaleCmPerCell} cm/case)`
+      : scan.scaleSource === 'etalon-manuel' ? 'référence saisie manuellement'
+      : `grossière (~${scan.scaleCmPerCell} cm/case, aucun étalon vu)`}.
       Vérifiez/corrigez les poids puis ajoutez à l'inventaire.</p>
     ${candidatesHtml || '<p class="empty">Rien reconnu — éclairage trop uniforme ?</p>'}
   </section>` : ''}
@@ -387,8 +408,13 @@ function renderScan() {
       <li>⚖️ <b>Poids</b> : une caméra ne peut pas peser ! L'app croise la forme
           reconnue avec le <b>catalogue de poids réels</b> → estimation affichée
           avec son niveau de confiance. Vous confirmez ou corrigez une fois.</li>
-      <li>🧠 <b>Mémoire</b> : après confirmation (${memCount} silhouette(s) connue(s)),
-          la même forme revue en photo reprend le poids déjà validé, automatiquement.</li>
+      <li>🧠 <b>Mémoire par TAILLE RÉELLE</b> (${memCount} type(s) connu(s)) : la signature
+          d'un objet combine sa forme ET son encombrement en cm — pas les pixels.
+          Une bétonnière revue sous la pluie reprend son poids ; mais des bouteilles
+          de 0,5 L après avoir scanné du 1,5 L ont une taille différente ⇒ l'app
+          redemande le poids (une fois), elle ne réutilise jamais l'ancien.</li>
+      <li>💾 <b>Bouton « Poids »</b> : mémorise le poids sans charger l'objet — utile
+          pour enregistrer vos contenances habituelles (1,5 L, 0,5 L…) d'avance.</li>
       <li>📴 100 % local : aucune photo ne quitte le téléphone.</li>
     </ul>
   </section>`;
@@ -601,7 +627,9 @@ function bindEvents(veh, rep) {
         state.lastScan = {
           objects: res.objects, previewUrl: res.previewUrl,
           scaleCmPerCell: res.scaleCmPerCell, scaleSource: res.scaleSource,
+          scaleRef: res.scaleRef ?? null,
         };
+        state.scanWeights = {};   // nouvelles photos → nouvelles saisies
         persist();
         render();
         if (!res.objects.length) toast('Aucune silhouette nette — éclairage/angle ?', 'var(--orange)');
@@ -614,6 +642,28 @@ function bindEvents(veh, rep) {
     img.src = url;
     scanFile.value = '';
   });
+
+  // Édition des poids proposés : conservée entre les re-rendus
+  app.querySelectorAll('[data-widx]').forEach(inp =>
+    inp.addEventListener('input', () => {
+      state.scanWeights[inp.dataset.widx] = parseFloat(inp.value) || 0;
+    }));
+
+  // 💾 Mémoriser le poids d'un type de silhouette SANS l'ajouter à l'inventaire
+  app.querySelectorAll('[data-savew]').forEach(b =>
+    b.addEventListener('click', () => {
+      const idx = Number(b.dataset.savew);
+      const o = state.lastScan?.objects?.[idx];
+      if (!o) return;
+      const wInput = app.querySelector(`[data-widx="${idx}"]`);
+      const weight = wInput ? (parseFloat(wInput.value) || 0) : 0;
+      if (weight <= 0) { toast('Indiquez d\'abord un poids', 'var(--orange)'); return; }
+      const cat = findCatalogMatch(o.label);
+      state.scanMemory[signatureOf(o)] = { weight, name: cat ? cat.name : o.label };
+      persist();
+      toast(`💾 ${weight} kg mémorisé pour « ${cat ? cat.name : o.label} »`, 'var(--blue)');
+      render();
+    }));
 
   // Accepter un objet reconnu → inventaire (+ poids mémorisé pour ce type)
   app.querySelectorAll('[data-accept]').forEach(b =>
@@ -633,7 +683,9 @@ function bindEvents(veh, rep) {
       const cat = findCatalogMatch(o.label);
       const name = cat ? cat.name : o.label;
       addItem(name, weight, o.icon, shape ? null : volume, footprint, shape);
-      // 🧠 mémorise : même silhouette revue en photo → ce poids confirmé
+      // 🧠 mémorise sous la signature « forme + taille réelle » : la prochaine
+      // photo d'un objet de MÊME gabarit reprendra ce poids — mais PAS un objet
+      // plus petit/pus grand (ex. bouteille 0,5 L ≠ 1,5 L : autre palier).
       state.scanMemory[signatureOf(o)] = { weight, name };
       persist();
     }));
